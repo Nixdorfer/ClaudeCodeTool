@@ -1,0 +1,10 @@
+/*
+!/CLAUDE.md
+!/.gitignore
+!/skills/
+!/supervisor/
+!/mcp/*/*.py
+!/mcp/*/*.txt
+!/mcp/*/*.bat
+!/mcp/*/*.cmd
+!/mcp/*/*.ps1
