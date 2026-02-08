@@ -1,17 +1,22 @@
-- 我不是专业人士 如果我提出的要求并不是最优解 告知我更好的方案是什么
-- 多subagent并行工作流 (当需要派发3个以上subagent时必须使用):
-  1. 派发N个worker subagent (run_in_background=true), 收集所有task_id
-  2. 派发1个Bash supervisor subagent (非background), 命令为:
-     `powershell -File C:/Users/Nix/.claude/supervisor/poll.ps1 -TaskIds "id1","id2","id3" -TimeoutSeconds 600`
-     supervisor会每秒轮询所有worker的output文件, 全部完成后输出汇总并退出
-  3. 主agent阻塞等待supervisor返回 (supervisor本身就是阻塞调用)
-  4. supervisor返回后, 主agent用 TaskOutput 逐个读取各worker结果, 然后继续工作
-  - 脚本: ~/.claude/supervisor/poll.ps1 (轮询) + parse-result.ps1 (解析单个worker输出)
-  - poll.ps1输出格式: 首行DONE/TIMEOUT, 后续每行 OK|id 或 FAIL|id|错误数|首条错误
-- 代码不要写注释
-- 使用简体中文回答问题
-- 在多个模块中复用的代码单独提取出来形成一个库
-- 每份文件确保功能完整性和单一性 单个文件内完整实现某一项功能 同时不包含其他功能的代码 不要让一份文件的代码过多
-- 少使用专用代码(即某个代码只针对于少量特例起作用) 多使用泛化代码+解耦合配置注入
-- 如果我的要求可以通过调用某个库来实现 请告知我
-- 只在必要情况下解释运行和思考路径 否则不需要向我持续汇报 只展示todo即可
+# 回复风格
+
+- 展示给用户的内容使用简体中文 但不需要展示给用户的内容(例如思考过程或MCP等)请使用尽可能节省token的英语
+- 只展示todo和关键结论不解释思考过程和运行路径
+- 描述有歧义时展示选项让我细化不要猜测
+- 如果我的要求不是最优解先告知更好方案
+- 如果可以通过现有库实现告知库名而非手写
+
+# 代码原则
+
+- 代码不写注释
+- 多模块复用的代码提取为独立库
+- 每个文件功能单一且完整不过度膨胀
+- 优先泛化代码+配置注入避免硬编码特例
+
+# 工作流
+
+- 复杂任务执行前，先在项目的.claude/plans/生成md计划文件
+- 需要派发3个以上subagent时使用并行工作流
+  1. 派发N个worker subagent(run_in_background=true)收集所有task_id
+  2. 同一条消息中并行调用N个TaskOutput(id, block=true, timeout=600000)阻塞等待
+  3. 全部返回后主agent继续

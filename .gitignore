@@ -2,7 +2,6 @@
 !/CLAUDE.md
 !/.gitignore
 !/skills/
-!/supervisor/
 !/mcp/
 /mcp/**/__pycache__/
 /mcp/**/venv/

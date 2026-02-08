@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "code-RAG": {
+      "type": "stdio",
+      "command": "${USERPROFILE}/.claude/mcp/code-RAG/venv/Scripts/python.exe",
+      "args": ["${USERPROFILE}/.claude/mcp/code-RAG/server.py"],
+      "env": {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1"
+      }
+    }
+  }
+}

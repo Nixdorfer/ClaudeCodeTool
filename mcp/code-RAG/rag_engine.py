@@ -15,7 +15,11 @@ logger = logging.getLogger(__name__)
 SUPPORTED_EXTENSIONS = {
     ".rs", ".ts", ".tsx", ".js", ".jsx", ".vue", ".py",
     ".toml", ".json", ".yaml", ".yml", ".md",
-    ".glsl", ".wgsl", ".html", ".css", ".scss",
+    ".glsl", ".wgsl", ".hlsl", ".vert", ".frag", ".comp", ".geom", ".tesc", ".tese",
+    ".html", ".css", ".scss",
+    ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".hxx",
+    ".cs", ".go", ".php",
+    ".s", ".S", ".asm",
 }
 
 IGNORE_DIRS = {
@@ -54,6 +58,17 @@ KNOWLEDGE_SCHEMA = pa.schema([
     pa.field("vector", pa.list_(pa.float32(), 384)),
 ])
 
+SYMBOL_SCHEMA = pa.schema([
+    pa.field("id", pa.utf8()),
+    pa.field("name", pa.utf8()),
+    pa.field("kind", pa.utf8()),
+    pa.field("signature", pa.utf8()),
+    pa.field("file", pa.utf8()),
+    pa.field("line", pa.int32()),
+    pa.field("language", pa.utf8()),
+    pa.field("vector", pa.list_(pa.float32(), 384)),
+])
+
 
 def _ext_to_lang(ext: str) -> str:
     mapping = {
@@ -61,10 +76,87 @@ def _ext_to_lang(ext: str) -> str:
         ".js": "javascript", ".jsx": "javascript", ".vue": "vue",
         ".py": "python", ".toml": "toml", ".json": "json",
         ".yaml": "yaml", ".yml": "yaml", ".md": "markdown",
-        ".glsl": "glsl", ".wgsl": "wgsl", ".html": "html",
-        ".css": "css", ".scss": "scss",
+        ".glsl": "glsl", ".wgsl": "wgsl", ".hlsl": "hlsl",
+        ".vert": "glsl", ".frag": "glsl", ".comp": "glsl",
+        ".geom": "glsl", ".tesc": "glsl", ".tese": "glsl",
+        ".html": "html", ".css": "css", ".scss": "scss",
+        ".c": "c", ".h": "c", ".cpp": "cpp", ".hpp": "cpp",
+        ".cc": "cpp", ".cxx": "cpp", ".hxx": "cpp",
+        ".cs": "csharp", ".go": "go", ".php": "php",
+        ".s": "asm", ".S": "asm", ".asm": "asm",
     }
     return mapping.get(ext, "text")
+
+
+def _extract_signatures(text: str, language: str) -> list[str]:
+    import re
+    sigs = []
+    if language in ("rust",):
+        for m in re.finditer(r'^\s*(pub\s+)?(async\s+)?(fn\s+\w+\s*(?:<[^>]*>)?\s*\([^)]*\))', text, re.MULTILINE):
+            sigs.append(m.group(3).strip())
+        for m in re.finditer(r'^\s*(pub\s+)?(struct|enum|trait|type|impl)\s+(\S+)', text, re.MULTILINE):
+            sigs.append(f"{m.group(2)} {m.group(3)}")
+    elif language in ("typescript", "javascript", "vue"):
+        for m in re.finditer(r'(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)', text, re.MULTILINE):
+            sigs.append(f"function {m.group(1)}(...)")
+        for m in re.finditer(r'(?:export\s+)?(?:abstract\s+)?(?:class|interface|type|enum)\s+(\w+)', text, re.MULTILINE):
+            sigs.append(m.group(0).strip())
+        for m in re.finditer(r'^\s*(?:public|private|protected)?\s*(?:async\s+)?(\w+)\s*\([^)]*\)\s*[:{]', text, re.MULTILINE):
+            name = m.group(1)
+            if name not in ('if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'new', 'else'):
+                sigs.append(f".{name}(...)")
+    elif language in ("python",):
+        for m in re.finditer(r'^\s*(?:async\s+)?def\s+(\w+)\s*\([^)]*\)', text, re.MULTILINE):
+            sigs.append(f"def {m.group(1)}(...)")
+        for m in re.finditer(r'^\s*class\s+(\w+)', text, re.MULTILINE):
+            sigs.append(f"class {m.group(1)}")
+    elif language in ("c", "cpp"):
+        for m in re.finditer(r'^\s*(?:virtual\s+|static\s+|inline\s+|extern\s+)*[\w:*&<>\s]+?\b(\w+)\s*\([^)]*\)\s*(?:const\s*)?(?:override\s*)?(?:noexcept\s*)?[{;]', text, re.MULTILINE):
+            name = m.group(1)
+            if name not in ('if', 'for', 'while', 'switch', 'catch', 'return', 'sizeof', 'typeof', 'else'):
+                sigs.append(f"{name}(...)")
+        for m in re.finditer(r'^\s*(?:template\s*<[^>]*>\s*)?(?:class|struct|enum|union|namespace)\s+(\w+)', text, re.MULTILINE):
+            sigs.append(m.group(0).strip())
+    elif language in ("csharp",):
+        for m in re.finditer(r'^\s*(?:public|private|protected|internal|static|virtual|override|async|abstract|sealed|\s)*[\w<>\[\],\s]+\s+(\w+)\s*\([^)]*\)\s*[{;]', text, re.MULTILINE):
+            name = m.group(1)
+            if name not in ('if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'else', 'foreach', 'lock', 'using'):
+                sigs.append(f"{name}(...)")
+        for m in re.finditer(r'^\s*(?:public|private|protected|internal|static|abstract|sealed|\s)*(?:class|struct|enum|interface|record|namespace)\s+(\w+)', text, re.MULTILINE):
+            sigs.append(m.group(0).strip())
+    elif language in ("go",):
+        for m in re.finditer(r'^\s*func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\([^)]*\)', text, re.MULTILINE):
+            sigs.append(f"func {m.group(1)}(...)")
+        for m in re.finditer(r'^\s*type\s+(\w+)\s+(struct|interface)', text, re.MULTILINE):
+            sigs.append(f"type {m.group(1)} {m.group(2)}")
+    elif language in ("php",):
+        for m in re.finditer(r'^\s*(?:public|private|protected|static|\s)*function\s+(\w+)\s*\([^)]*\)', text, re.MULTILINE):
+            sigs.append(f"function {m.group(1)}(...)")
+        for m in re.finditer(r'^\s*(?:abstract\s+|final\s+)?class\s+(\w+)', text, re.MULTILINE):
+            sigs.append(f"class {m.group(1)}")
+        for m in re.finditer(r'^\s*(?:interface|trait|enum)\s+(\w+)', text, re.MULTILINE):
+            sigs.append(m.group(0).strip())
+    elif language in ("glsl", "hlsl", "wgsl"):
+        for m in re.finditer(r'^\s*(?:void|float|vec[234]|mat[234]|int|uint|bool|half[234]?|f(?:16|32))\s+(\w+)\s*\([^)]*\)', text, re.MULTILINE):
+            sigs.append(f"{m.group(1)}(...)")
+        for m in re.finditer(r'^\s*(?:struct|cbuffer|tbuffer)\s+(\w+)', text, re.MULTILINE):
+            sigs.append(f"struct {m.group(1)}")
+        if language == "wgsl":
+            for m in re.finditer(r'^\s*fn\s+(\w+)\s*\([^)]*\)', text, re.MULTILINE):
+                sigs.append(f"fn {m.group(1)}(...)")
+    elif language in ("asm",):
+        for m in re.finditer(r'^(\w+):', text, re.MULTILINE):
+            sigs.append(f"{m.group(1)}:")
+    seen = set()
+    return [s for s in sigs if not (s in seen or seen.add(s))]
+
+
+def summarize_chunk(content: str, language: str, max_context_lines: int = 3) -> str:
+    sigs = _extract_signatures(content, language)
+    if sigs:
+        return " | ".join(sigs)
+    lines = [l.rstrip() for l in content.split("\n") if l.strip() and not l.strip().startswith(("//", "#", "/*", "*", "<!--"))]
+    return " | ".join(lines[:max_context_lines]) if lines else "(empty)"
 
 
 def _chunk_by_lines(text: str, chunk_lines: int = 60, overlap_lines: int = 10) -> list[tuple[int, int, str]]:
@@ -87,17 +179,19 @@ def _file_hash(content: str) -> str:
 
 
 class RAGEngine:
-    def __init__(self, db_path: str, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(self, db_path: str, model_name: str = "all-MiniLM-L6-v2", model: Optional[SentenceTransformer] = None):
         self.db_path = db_path
         self.db = lancedb.connect(db_path)
-        self.model = SentenceTransformer(model_name)
+        self.model = model or SentenceTransformer(model_name)
         self.table: Optional[lancedb.table.Table] = None
         self.knowledge_table: Optional[lancedb.table.Table] = None
+        self.symbol_table: Optional[lancedb.table.Table] = None
         self.hash_cache_path = os.path.join(db_path, "file_hashes.json")
         self._file_hashes: dict[str, str] = {}
         self._load_hashes()
         self._try_open_table()
         self._try_open_knowledge_table()
+        self._try_open_symbol_table()
         self._validate_cache()
 
     def _load_hashes(self):
@@ -184,21 +278,22 @@ class RAGEngine:
                 continue
 
             lang = _ext_to_lang(file_path.suffix)
-            chunks = _chunk_by_lines(content)
+            from chunker import chunk_by_functions
+            chunks = chunk_by_functions(content, lang)
 
-            for start, end, chunk_text in chunks:
-                if len(chunk_text.strip()) < 10:
+            for chunk in chunks:
+                if len(chunk["content"].strip()) < 10:
                     continue
-                chunk_id = f"{file_key}:{start}-{end}"
+                chunk_id = f"{file_key}:{chunk['start_line']}-{chunk['end_line']}"
                 pending_chunks.append({
                     "id": chunk_id,
-                    "content": chunk_text,
+                    "content": chunk["content"],
                     "source": file_key,
-                    "start_line": start,
-                    "end_line": end,
+                    "start_line": chunk["start_line"],
+                    "end_line": chunk["end_line"],
                     "language": lang,
                 })
-                pending_texts.append(chunk_text)
+                pending_texts.append(chunk["content"])
 
             self._file_hashes[file_key] = content_hash
             indexed_files += 1
@@ -289,6 +384,103 @@ class RAGEngine:
             self.knowledge_table = self.db.open_table("knowledge")
         except Exception:
             self.knowledge_table = None
+
+    def _try_open_symbol_table(self):
+        try:
+            self.symbol_table = self.db.open_table("symbols")
+        except Exception:
+            self.symbol_table = None
+
+    def index_symbols(self, symbols: list[dict]) -> dict:
+        if not symbols:
+            return {"indexed": 0}
+
+        records = []
+        texts = []
+        for s in symbols:
+            embed_text = f"{s['kind']} {s['name']} {s['signature']}"
+            records.append({
+                "id": f"{s['file']}:{s['line']}:{s['name']}",
+                "name": s["name"],
+                "kind": s["kind"],
+                "signature": s["signature"],
+                "file": s["file"],
+                "line": s["line"],
+                "language": s["language"],
+            })
+            texts.append(embed_text)
+
+        vectors = self._batch_encode(texts)
+        for rec, vec in zip(records, vectors):
+            rec["vector"] = vec
+
+        self.symbol_table = self.db.create_table(
+            "symbols", data=records, schema=SYMBOL_SCHEMA, mode="overwrite"
+        )
+        return {"indexed": len(records)}
+
+    def lookup_symbol(self, name: str, kind: str = "", language: str = "") -> list[dict]:
+        if self.symbol_table is None:
+            return []
+        try:
+            rows = self.symbol_table.to_arrow().to_pylist()
+            results = []
+            name_lower = name.lower()
+            for r in rows:
+                if name_lower not in r["name"].lower():
+                    continue
+                if kind and r["kind"] != kind:
+                    continue
+                if language and r["language"] != language:
+                    continue
+                results.append({
+                    "name": r["name"],
+                    "kind": r["kind"],
+                    "signature": r["signature"],
+                    "file": r["file"],
+                    "line": r["line"],
+                    "language": r["language"],
+                })
+            results.sort(key=lambda x: (x["name"].lower() != name_lower, x["kind"], x["file"]))
+            return results[:50]
+        except Exception as e:
+            logger.error(f"Symbol lookup failed: {e}")
+            return []
+
+    def search_symbols(self, query: str, top_k: int = 20, kind: str = "") -> list[dict]:
+        if self.symbol_table is None:
+            return []
+        query_vec = self.model.encode(query).tolist()
+        builder = self.symbol_table.search(query_vec).limit(top_k)
+        if kind:
+            builder = builder.where(f"kind = '{kind}'")
+        try:
+            results = builder.to_list()
+        except Exception as e:
+            logger.error(f"Symbol search failed: {e}")
+            return []
+        return [
+            {
+                "name": r["name"],
+                "kind": r["kind"],
+                "signature": r["signature"],
+                "file": r["file"],
+                "line": r["line"],
+                "language": r["language"],
+                "score": float(1.0 / (1.0 + r.get("_distance", 0))),
+            }
+            for r in results
+        ]
+
+    def get_symbol_status(self) -> dict:
+        self._try_open_symbol_table()
+        if self.symbol_table is None:
+            return {"indexed": False, "total_symbols": 0}
+        try:
+            count = self.symbol_table.count_rows()
+            return {"indexed": True, "total_symbols": count}
+        except Exception:
+            return {"indexed": False, "total_symbols": 0}
 
     def add_knowledge(self, title: str, content: str, category: str = "general", tags: list[str] | None = None) -> dict:
         entry_id = uuid.uuid4().hex[:12]
@@ -384,3 +576,67 @@ class RAGEngine:
             }
         except Exception:
             return {"has_knowledge": False, "total_entries": 0, "categories": []}
+
+    def compact_knowledge(self, similarity_threshold: float = 0.85) -> dict:
+        if self.knowledge_table is None:
+            return {"removed": 0, "kept": 0}
+
+        try:
+            rows = self.knowledge_table.to_arrow().to_pylist()
+        except Exception:
+            return {"removed": 0, "kept": 0}
+
+        if len(rows) < 2:
+            return {"removed": 0, "kept": len(rows)}
+
+        import numpy as np
+        vectors = np.array([r["vector"] for r in rows])
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1
+        normalized = vectors / norms
+
+        remove_ids = set()
+        for i in range(len(rows)):
+            if rows[i]["id"] in remove_ids:
+                continue
+            for j in range(i + 1, len(rows)):
+                if rows[j]["id"] in remove_ids:
+                    continue
+                sim = float(np.dot(normalized[i], normalized[j]))
+                if sim >= similarity_threshold:
+                    older = i if rows[i].get("timestamp", 0) < rows[j].get("timestamp", 0) else j
+                    remove_ids.add(rows[older]["id"])
+
+        if remove_ids:
+            kept = [r for r in rows if r["id"] not in remove_ids]
+            self.knowledge_table = self.db.create_table(
+                "knowledge", data=kept, schema=KNOWLEDGE_SCHEMA, mode="overwrite"
+            )
+
+        return {"removed": len(remove_ids), "kept": len(rows) - len(remove_ids)}
+
+    def export_knowledge(self, category: str | None = None) -> str:
+        if self.knowledge_table is None:
+            return ""
+        try:
+            rows = self.knowledge_table.to_arrow().to_pylist()
+            if category:
+                rows = [r for r in rows if r["category"] == category]
+            rows.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
+        except Exception:
+            return ""
+
+        lines = []
+        by_cat: dict[str, list] = {}
+        for r in rows:
+            by_cat.setdefault(r["category"], []).append(r)
+
+        for cat, entries in sorted(by_cat.items()):
+            lines.append(f"## {cat}")
+            for e in entries:
+                tags = e["tags"] if e["tags"] else ""
+                lines.append(f"### {e['title']}" + (f" [{tags}]" if tags else ""))
+                lines.append(e["content"])
+                lines.append("")
+
+        return "\n".join(lines)
