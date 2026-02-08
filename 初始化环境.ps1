@@ -26,6 +26,4 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "环境安装完成" -ForegroundColor Green
-Write-Host "请复制.mcp.json到你的项目根目录来启用RAG" -ForegroundColor Green
-Write-Host "首次运行时 请在对话框中输入“创建code-RAG索引”" -ForegroundColor Green
 Read-Host "Press Enter to exit"
