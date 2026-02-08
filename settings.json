@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python C:/Users/Nix/.claude/hooks/compact-log.py",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python C:/Users/Nix/.claude/hooks/fetch-spa-intercept.py",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

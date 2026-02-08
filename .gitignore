@@ -1,7 +1,14 @@
 /*
+
+!/settings.json
 !/CLAUDE.md
+!/ClaudeCode功能介绍.md
 !/.gitignore
-!/skills/
+
 !/mcp/
+!/hooks/
+!/skills/
+!/plugins/
+!/scripts/
 /mcp/**/__pycache__/
 /mcp/**/venv/

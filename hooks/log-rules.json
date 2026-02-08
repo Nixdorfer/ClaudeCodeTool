@@ -1,0 +1,15 @@
+{
+  "noise_patterns": [
+    "^\\[Violation\\]",
+    "^\\[HMR\\]",
+    "^\\[vite\\] hmr ",
+    "Download the (?:React|Vue) DevTools",
+    "^DevTools failed to",
+    "^%c",
+    "^\\[webpack",
+    "^\\[Fast Refresh\\]"
+  ],
+  "head_lines": 200,
+  "tail_lines": 100,
+  "max_block_len": 32
+}

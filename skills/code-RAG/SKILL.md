@@ -1,10 +1,8 @@
 ---
 name: code-RAG
 description: Local code RAG KB. 34 MCP tools for semantic code search, knowledge management, symbol lookup, code analysis. Load this skill before using any mcp__code-RAG__ tool.
+allowed-tools: mcp__code-RAG__*
 ---
-
-After each task, silently: 1) index_codebase 2) add_knowledge.
-Knowledge: English, minimal tokens. bugfix→wait confirm then scope=project+global. Others→immediate scope=project.
 
 ## Tool index (load subfile for usage)
 

@@ -1,6 +1,6 @@
 ---
 name: coding
-description: 代码规范指南，包括CSS/JS/Go/Vue/HTML的命名、格式和风格要求
+description: 代码规范指南 包括命名 格式和风格要求 在涉及到编写代码任务时先读取该文档
 ---
 
 # 主要基本规则
@@ -11,8 +11,8 @@ description: 代码规范指南，包括CSS/JS/Go/Vue/HTML的命名、格式和�
 - 请注意代码的可读性 有合理换行和缩进
 - 在每个块之间有一个空行
 
-[CSS书写规范](CSS.md)
-[SCRIPT书写规范](SCRIPT.md)
-[HTML书写规范](HTML.md)
-[Vue书写规范](VUE.md)
-[前端书写规范](FRONTEND.md)
+[Go/JS/TS/Rust/PHP/Java等逻辑代码风格书写规范](script.md)
+[用户界面设计规范](user-interface.md)
+[CSS代码风格书写规范](css.md)
+[纯原生HTML代码风格书写规范](html.md)
+[Vue代码风格书写规范](vue.md)
