@@ -3,6 +3,8 @@
 !/.gitignore
 !/skills/
 !/supervisor/
+!/mcp/
+/mcp/**
 !/mcp/*/*.py
 !/mcp/*/*.txt
 !/mcp/*/*.bat
