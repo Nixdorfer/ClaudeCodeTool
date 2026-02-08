@@ -3,7 +3,9 @@ import logging
 from pathlib import Path
 from collections import defaultdict
 
-from symbols import extract_symbols, IGNORE_DIRS, CODE_EXTENSIONS
+from symbols import extract_symbols
+from lang_registry import ext_to_lang, SUPPORTED_EXTENSIONS, SUPPORTED_FILENAMES
+from file_walker import walk_code_files, get_ignore_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,7 @@ def module_map(directory: str, max_depth: int = 3) -> dict:
     if not root.is_dir():
         return {"error": f"Not a directory: {directory}"}
 
+    ignore_dirs = get_ignore_dirs()
     tree = {}
 
     def _scan(current: Path, depth: int, node: dict):
@@ -65,9 +68,9 @@ def module_map(directory: str, max_depth: int = 3) -> dict:
             if entry.name.startswith("."):
                 continue
             if entry.is_dir():
-                if entry.name not in IGNORE_DIRS:
+                if entry.name not in ignore_dirs:
                     dirs.append(entry)
-            elif entry.is_file() and entry.suffix in CODE_EXTENSIONS:
+            elif entry.is_file() and (entry.suffix in SUPPORTED_EXTENSIONS or entry.name in SUPPORTED_FILENAMES):
                 files.append(entry)
 
         for f in files:
@@ -76,9 +79,13 @@ def module_map(directory: str, max_depth: int = 3) -> dict:
             for s in syms:
                 kind_counts[s["kind"]] += 1
 
+            try:
+                line_count = f.read_text(encoding="utf-8", errors="ignore").count("\n") + 1
+            except Exception:
+                line_count = 0
             node[f.name] = {
                 "_type": "file",
-                "_lines": sum(1 for _ in open(f, encoding="utf-8", errors="ignore")),
+                "_lines": line_count,
                 "_symbols": dict(kind_counts),
                 "_key_symbols": [s["name"] for s in syms if s["kind"] in ("class", "struct", "trait", "interface", "enum")][:5],
             }
@@ -143,28 +150,19 @@ def directory_summary(directory: str) -> dict:
     total_files = 0
     total_lines = 0
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
-        for fname in filenames:
-            fpath = Path(dirpath) / fname
-            if fpath.suffix not in CODE_EXTENSIONS:
-                continue
-            total_files += 1
-            ext_lang = {
-                ".rs": "rust", ".ts": "typescript", ".tsx": "typescript",
-                ".js": "javascript", ".jsx": "javascript",
-                ".vue": "vue", ".py": "python",
-            }.get(fpath.suffix, "other")
-            try:
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
-                lc = content.count("\n") + 1
-                total_lines += lc
-                lang_stats[ext_lang]["files"] += 1
-                lang_stats[ext_lang]["lines"] += lc
-                syms = extract_symbols(str(fpath), content)
-                lang_stats[ext_lang]["symbols"] += len(syms)
-            except Exception:
-                continue
+    for fpath in walk_code_files(directory):
+        total_files += 1
+        lang = ext_to_lang(fpath.suffix if fpath.suffix else fpath.name)
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="ignore")
+            lc = content.count("\n") + 1
+            total_lines += lc
+            lang_stats[lang]["files"] += 1
+            lang_stats[lang]["lines"] += lc
+            syms = extract_symbols(str(fpath), content)
+            lang_stats[lang]["symbols"] += len(syms)
+        except Exception:
+            continue
 
     return {
         "directory": directory,

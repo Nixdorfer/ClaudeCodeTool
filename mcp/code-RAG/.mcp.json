@@ -7,7 +7,25 @@
       "env": {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1"
-      }
+      },
+      "ragIgnoreDirs": [
+        ".git",
+        ".claude",
+        "node_modules",
+        "__pycache__",
+        "venv",
+        ".venv",
+        "dist",
+        "build",
+        "target",
+        "runtime"
+      ],
+      "ragIgnore": [
+        "*.log",
+        "*-lock.yaml"
+      ],
+      "ragLibs": [],
+      "ragMaxFileSize": 512
     }
   }
 }

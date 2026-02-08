@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Optional
 from collections import defaultdict
 
+from lang_registry import ext_to_lang, SUPPORTED_EXTENSIONS
+from file_walker import walk_code_files, get_ignore_dirs, get_lib_abs_paths
+
 logger = logging.getLogger(__name__)
 
 IMPORT_PATTERNS = {
@@ -28,46 +31,80 @@ IMPORT_PATTERNS = {
     "vue": [
         re.compile(r'''(?:import|export)\s+.*?\s+from\s+['"]([^'"]+)['"]'''),
     ],
+    "java": [
+        re.compile(r'''^\s*import\s+(?:static\s+)?([\w.]+)\s*;''', re.MULTILINE),
+    ],
+    "kotlin": [
+        re.compile(r'''^\s*import\s+([\w.]+)''', re.MULTILINE),
+    ],
+    "scala": [
+        re.compile(r'''^\s*import\s+([\w.{},\s]+)''', re.MULTILINE),
+    ],
+    "go": [
+        re.compile(r'''^\s*import\s+"([^"]+)"''', re.MULTILINE),
+        re.compile(r'''^\s*"([^"]+)"''', re.MULTILINE),
+    ],
+    "ruby": [
+        re.compile(r'''^\s*require\s+['"]([^'"]+)['"]''', re.MULTILINE),
+        re.compile(r'''^\s*require_relative\s+['"]([^'"]+)['"]''', re.MULTILINE),
+    ],
+    "c": [
+        re.compile(r'''^\s*#include\s*[<"]([^>"]+)[>"]''', re.MULTILINE),
+    ],
+    "cpp": [
+        re.compile(r'''^\s*#include\s*[<"]([^>"]+)[>"]''', re.MULTILINE),
+    ],
+    "csharp": [
+        re.compile(r'''^\s*using\s+([\w.]+)\s*;''', re.MULTILINE),
+    ],
+    "php": [
+        re.compile(r'''^\s*use\s+([\w\\]+)\s*;''', re.MULTILINE),
+        re.compile(r'''^\s*(?:require|include)(?:_once)?\s+['"]([^'"]+)['"]''', re.MULTILINE),
+    ],
+    "dart": [
+        re.compile(r'''^\s*import\s+['"]([^'"]+)['"]''', re.MULTILINE),
+    ],
+    "swift": [
+        re.compile(r'''^\s*import\s+(\w+)''', re.MULTILINE),
+    ],
+    "elixir": [
+        re.compile(r'''^\s*(?:import|alias|use|require)\s+([\w.]+)''', re.MULTILINE),
+    ],
+    "haskell": [
+        re.compile(r'''^\s*import\s+(?:qualified\s+)?([\w.]+)''', re.MULTILINE),
+    ],
+    "ocaml": [
+        re.compile(r'''^\s*open\s+(\w+)''', re.MULTILINE),
+    ],
+    "erlang": [
+        re.compile(r'''^\s*-include\(\s*"([^"]+)"\s*\)''', re.MULTILINE),
+    ],
+    "julia": [
+        re.compile(r'''^\s*(?:using|import)\s+([\w.]+)''', re.MULTILINE),
+    ],
+    "perl": [
+        re.compile(r'''^\s*use\s+([\w:]+)''', re.MULTILINE),
+        re.compile(r'''^\s*require\s+['"]?([^'"\s;]+)''', re.MULTILINE),
+    ],
+    "lua": [
+        re.compile(r'''^\s*(?:local\s+\w+\s*=\s*)?require\s*\(\s*['"]([^'"]+)['"]''', re.MULTILINE),
+    ],
+    "zig": [
+        re.compile(r'''@import\s*\(\s*"([^"]+)"\s*\)'''),
+    ],
+    "nim": [
+        re.compile(r'''^\s*import\s+([\w/]+)''', re.MULTILINE),
+        re.compile(r'''^\s*from\s+([\w/]+)\s+import''', re.MULTILINE),
+    ],
+    "proto": [
+        re.compile(r'''^\s*import\s+"([^"]+)"''', re.MULTILINE),
+    ],
 }
 
 ANNOTATION_PATTERN = re.compile(
     r'(?://|#|/\*\*?)\s*(TODO|FIXME|HACK|XXX|BUG|WARN|NOTE|PERF|SAFETY)\b[:\s]*(.*?)(?:\*/)?$',
     re.MULTILINE | re.IGNORECASE,
 )
-
-IGNORE_DIRS = {
-    "node_modules", ".git", "target", "dist", "build",
-    "__pycache__", ".cache", "pkg", "wasm-pack-out",
-    ".claude", "venv", ".venv", "env", ".env",
-    "runtime", ".idea", ".vscode", ".next",
-    "coverage", ".nyc_output", ".turbo",
-}
-
-CODE_EXTENSIONS = {
-    ".rs", ".ts", ".tsx", ".js", ".jsx", ".vue", ".py",
-    ".glsl", ".wgsl",
-}
-
-
-def _ext_to_lang(ext: str) -> str:
-    mapping = {
-        ".rs": "rust", ".ts": "typescript", ".tsx": "typescript",
-        ".js": "javascript", ".jsx": "javascript", ".vue": "vue",
-        ".py": "python",
-    }
-    return mapping.get(ext, "")
-
-
-def _collect_code_files(directory: str) -> list[Path]:
-    root = Path(directory)
-    files = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
-        for fname in filenames:
-            fpath = Path(dirpath) / fname
-            if fpath.suffix in CODE_EXTENSIONS:
-                files.append(fpath)
-    return files
 
 
 def _resolve_import(import_path: str, source_file: Path, project_root: str, lang: str) -> Optional[str]:
@@ -111,6 +148,35 @@ def _resolve_import(import_path: str, source_file: Path, project_root: str, lang
                         return str(mod_path / "mod.rs")
         return None
 
+    if lang == "python":
+        if import_path and not import_path.startswith("."):
+            parts = import_path.split(".")
+            candidate = root
+            for part in parts:
+                candidate = candidate / part
+            for suffix in [".py", "/__init__.py"]:
+                check = Path(str(candidate) + suffix)
+                if check.exists():
+                    return str(check)
+        return None
+
+    if lang in ("c", "cpp"):
+        if not import_path.startswith("/"):
+            candidate = source_file.parent / import_path
+            if candidate.exists():
+                return str(candidate)
+        return None
+
+    if lang == "go":
+        return None
+
+    if lang == "ruby":
+        if import_path and not import_path.startswith("/"):
+            candidate = source_file.parent / (import_path + ".rb")
+            if candidate.exists():
+                return str(candidate)
+        return None
+
     return None
 
 
@@ -119,8 +185,8 @@ def get_dependency_graph(file_path: str, project_root: str) -> dict:
     if not target.exists():
         return {"error": f"File not found: {file_path}"}
 
-    lang = _ext_to_lang(target.suffix)
-    if not lang:
+    lang = ext_to_lang(target.suffix if target.suffix else target.name)
+    if not lang or lang == "text":
         return {"error": f"Unsupported language: {target.suffix}"}
 
     imports_from = []
@@ -138,11 +204,11 @@ def get_dependency_graph(file_path: str, project_root: str) -> dict:
 
     imported_by = []
     target_str = str(target)
-    for f in _collect_code_files(project_root):
+    for f in walk_code_files(project_root):
         if f == target:
             continue
-        f_lang = _ext_to_lang(f.suffix)
-        if not f_lang:
+        f_lang = ext_to_lang(f.suffix if f.suffix else f.name)
+        if not f_lang or f_lang == "text":
             continue
         try:
             f_content = f.read_text(encoding="utf-8", errors="ignore")
@@ -165,12 +231,12 @@ def get_dependency_graph(file_path: str, project_root: str) -> dict:
 
 
 def find_orphan_files(project_root: str) -> dict:
-    files = _collect_code_files(project_root)
+    files = list(walk_code_files(project_root))
     all_resolved = set()
 
     for f in files:
-        lang = _ext_to_lang(f.suffix)
-        if not lang:
+        lang = ext_to_lang(f.suffix if f.suffix else f.name)
+        if not lang or lang == "text":
             continue
         try:
             content = f.read_text(encoding="utf-8", errors="ignore")
@@ -187,6 +253,9 @@ def find_orphan_files(project_root: str) -> dict:
     entry_patterns = [
         "main.ts", "main.rs", "lib.rs", "mod.rs", "index.ts", "index.js",
         "App.vue", "main.py", "__init__.py", "server.py",
+        "Main.java", "Application.java", "main.go", "Program.cs",
+        "main.kt", "Main.kt", "main.rb", "main.lua", "main.jl",
+        "Makefile", "Dockerfile",
     ]
 
     orphans = []
@@ -206,11 +275,10 @@ def find_orphan_files(project_root: str) -> dict:
 
 
 def scan_annotations(project_root: str, annotation_type: str = "") -> list[dict]:
-    files = _collect_code_files(project_root)
     results = []
     type_filter = annotation_type.upper() if annotation_type else None
 
-    for f in files:
+    for f in walk_code_files(project_root):
         try:
             content = f.read_text(encoding="utf-8", errors="ignore")
         except Exception:
@@ -364,22 +432,25 @@ def analyze_diff(project_root: str, ref: str = "") -> dict:
 
         affected_symbols = []
         full_path = os.path.join(project_root, fpath)
-        if os.path.isfile(full_path) and Path(full_path).suffix in CODE_EXTENSIONS:
-            try:
-                symbols = extract_symbols(full_path)
-                for sym in symbols:
-                    sym_line = sym.get("line", 0)
-                    end_line = sym.get("end_line", sym_line + 20)
-                    for _, _, ns, ne in hunk_ranges:
-                        if ns <= end_line and ne >= sym_line:
-                            affected_symbols.append({
-                                "name": sym["name"],
-                                "kind": sym.get("kind", ""),
-                                "line": sym_line,
-                            })
-                            break
-            except Exception:
-                pass
+        if os.path.isfile(full_path):
+            fp = Path(full_path)
+            file_lang = ext_to_lang(fp.suffix if fp.suffix else fp.name)
+            if file_lang and file_lang != "text":
+                try:
+                    symbols = extract_symbols(full_path)
+                    for sym in symbols:
+                        sym_line = sym.get("line", 0)
+                        end_line = sym.get("end_line", sym_line + 20)
+                        for _, _, ns, ne in hunk_ranges:
+                            if ns <= end_line and ne >= sym_line:
+                                affected_symbols.append({
+                                    "name": sym["name"],
+                                    "kind": sym.get("kind", ""),
+                                    "line": sym_line,
+                                })
+                                break
+                except Exception:
+                    pass
 
         changed_files.append({
             "file": fpath,
@@ -389,17 +460,16 @@ def analyze_diff(project_root: str, ref: str = "") -> dict:
         })
 
     impact = set()
-    all_code_files = _collect_code_files(project_root)
     changed_paths = set()
     for cf in changed_files:
         changed_paths.add(os.path.normpath(os.path.join(project_root, cf["file"])))
 
-    for f in all_code_files:
+    for f in walk_code_files(project_root):
         f_norm = os.path.normpath(str(f))
         if f_norm in changed_paths:
             continue
-        lang = _ext_to_lang(f.suffix)
-        if not lang:
+        lang = ext_to_lang(f.suffix if f.suffix else f.name)
+        if not lang or lang == "text":
             continue
         try:
             content = f.read_text(encoding="utf-8", errors="ignore")
@@ -431,64 +501,51 @@ def _snake_to_camel(name: str) -> str:
 
 def trace_cross_language(symbol_name: str, project_root: str) -> dict:
     camel_name = _snake_to_camel(symbol_name)
-    root = Path(project_root)
 
     rust_def = None
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
-        for fname in filenames:
-            if not fname.endswith(".rs"):
-                continue
-            fpath = os.path.join(dirpath, fname)
-            try:
-                content = open(fpath, encoding="utf-8", errors="ignore").read()
-            except Exception:
-                continue
-            fn_re = re.compile(rf'^\s*pub\s+fn\s+{re.escape(symbol_name)}\s*\(', re.MULTILINE)
-            m = fn_re.search(content)
-            if m:
-                line_num = content[:m.start()].count("\n") + 1
-                before = content[max(0, m.start() - 200):m.start()]
-                is_wasm = "#[wasm_bindgen]" in before or "#[wasm_bindgen(" in before
-                rust_def = {
-                    "file": os.path.relpath(fpath, project_root),
-                    "line": line_num,
-                    "is_wasm_export": is_wasm,
-                }
-                break
-        if rust_def:
+    fn_re = re.compile(rf'^\s*pub\s+fn\s+{re.escape(symbol_name)}\s*\(', re.MULTILINE)
+    for fpath in walk_code_files(project_root, lang_filter="rust"):
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        m = fn_re.search(content)
+        if m:
+            line_num = content[:m.start()].count("\n") + 1
+            before = content[max(0, m.start() - 200):m.start()]
+            is_wasm = "#[wasm_bindgen]" in before or "#[wasm_bindgen(" in before
+            rust_def = {
+                "file": os.path.relpath(str(fpath), project_root),
+                "line": line_num,
+                "is_wasm_export": is_wasm,
+            }
             break
 
     bridge_refs = []
     ts_callers = []
-    bridge_files = set()
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
-        for fname in filenames:
-            if not fname.endswith((".ts", ".tsx", ".js")):
-                continue
-            fpath = os.path.join(dirpath, fname)
-            try:
-                content = open(fpath, encoding="utf-8", errors="ignore").read()
-            except Exception:
-                continue
-            is_bridge = "bridge" in fname.lower() or "wasm" in fname.lower()
-            for search_name in {symbol_name, camel_name}:
-                pat = re.compile(rf'\b{re.escape(search_name)}\b')
-                for m in pat.finditer(content):
-                    line_num = content[:m.start()].count("\n") + 1
-                    line_text = content.split("\n")[line_num - 1].strip()
-                    entry = {
-                        "file": os.path.relpath(fpath, project_root),
-                        "line": line_num,
-                        "text": line_text[:200],
-                    }
-                    if is_bridge:
-                        bridge_refs.append(entry)
-                        bridge_files.add(fpath)
-                    else:
-                        ts_callers.append(entry)
-                    break
+    ts_exts = {".ts", ".tsx", ".js"}
+    for fpath in walk_code_files(project_root, extensions=ts_exts):
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        fname = fpath.name
+        is_bridge = "bridge" in fname.lower() or "wasm" in fname.lower()
+        for search_name in {symbol_name, camel_name}:
+            pat = re.compile(rf'\b{re.escape(search_name)}\b')
+            for m_ts in pat.finditer(content):
+                line_num = content[:m_ts.start()].count("\n") + 1
+                line_text = content.split("\n")[line_num - 1].strip()
+                entry = {
+                    "file": os.path.relpath(str(fpath), project_root),
+                    "line": line_num,
+                    "text": line_text[:200],
+                }
+                if is_bridge:
+                    bridge_refs.append(entry)
+                else:
+                    ts_callers.append(entry)
+                break
 
     chain = []
     if rust_def:
@@ -512,18 +569,26 @@ def diff_configs(project_root: str) -> dict:
     config_patterns = [
         "Cargo.toml", "package.json", "tsconfig.json",
         "tsconfig.*.json", ".eslintrc*", "vite.config.*", "wasm-pack.toml",
+        "pom.xml", "build.gradle", "build.sbt", "go.mod",
     ]
 
+    ignore_dirs = get_ignore_dirs()
+    lib_abs = get_lib_abs_paths()
     config_files = []
     for pattern in config_patterns:
-        from pathlib import Path as _P
-        for fpath in _P(project_root).rglob(pattern):
+        for fpath in Path(project_root).rglob(pattern):
+            fpath_norm = os.path.normpath(str(fpath))
             rel = os.path.relpath(str(fpath), project_root)
             skip = False
-            for ig in IGNORE_DIRS:
+            for ig in ignore_dirs:
                 if ig in rel.split(os.sep):
                     skip = True
                     break
+            if not skip:
+                for la in lib_abs:
+                    if fpath_norm == la or fpath_norm.startswith(la + os.sep):
+                        skip = True
+                        break
             if not skip:
                 config_files.append(str(fpath))
 

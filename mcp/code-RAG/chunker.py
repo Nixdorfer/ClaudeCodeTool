@@ -8,34 +8,7 @@ try:
 except ImportError:
     HAS_TREE_SITTER = False
 
-_TS_LANG_MAP = {
-    "rust": "rust", "typescript": "typescript", "javascript": "javascript",
-    "python": "python", "c": "c", "cpp": "cpp", "csharp": "c_sharp",
-    "go": "go", "php": "php", "vue": "javascript",
-}
-
-_FUNC_NODE_TYPES = {
-    "rust": {"function_item", "impl_item", "trait_item", "struct_item", "enum_item"},
-    "typescript": {"function_declaration", "method_definition", "class_declaration",
-                    "interface_declaration", "type_alias_declaration", "enum_declaration"},
-    "javascript": {"function_declaration", "method_definition", "class_declaration"},
-    "python": {"function_definition", "class_definition"},
-    "c": {"function_definition", "struct_specifier", "enum_specifier"},
-    "cpp": {"function_definition", "class_specifier", "struct_specifier",
-            "enum_specifier", "namespace_definition"},
-    "c_sharp": {"method_declaration", "class_declaration", "struct_declaration",
-                "interface_declaration", "enum_declaration", "namespace_declaration"},
-    "go": {"function_declaration", "method_declaration", "type_declaration"},
-    "php": {"function_definition", "method_declaration", "class_declaration",
-            "interface_declaration", "trait_declaration"},
-}
-
-_TOP_LEVEL_CONTAINERS = {
-    "impl_item", "class_declaration", "class_definition", "class_specifier",
-    "struct_specifier", "namespace_definition", "namespace_declaration",
-    "interface_declaration", "trait_item", "trait_declaration",
-    "module", "program",
-}
+from lang_registry import TS_LANG_MAP, FUNC_NODE_TYPES, TOP_LEVEL_CONTAINERS, LANGUAGES
 
 MIN_CHUNK_LINES = 3
 MAX_CHUNK_LINES = 120
@@ -54,7 +27,7 @@ def _node_text(node, source_bytes: bytes) -> str:
 
 
 def chunk_by_functions(source: str, language: str) -> list[dict]:
-    ts_lang = _TS_LANG_MAP.get(language)
+    ts_lang = TS_LANG_MAP.get(language)
     if not HAS_TREE_SITTER or not ts_lang:
         return _chunk_by_lines_fallback(source, language)
 
@@ -66,7 +39,7 @@ def chunk_by_functions(source: str, language: str) -> list[dict]:
     source_bytes = source.encode("utf-8")
     tree = parser.parse(source_bytes)
 
-    func_types = _FUNC_NODE_TYPES.get(ts_lang, set())
+    func_types = FUNC_NODE_TYPES.get(ts_lang, set())
     chunks: list[dict] = []
     covered = set()
 
@@ -76,7 +49,7 @@ def chunk_by_functions(source: str, language: str) -> list[dict]:
             end_line = node.end_point[0] + 1
             line_count = end_line - start_line + 1
 
-            if line_count > MAX_CHUNK_LINES and node.type in _TOP_LEVEL_CONTAINERS:
+            if line_count > MAX_CHUNK_LINES and node.type in TOP_LEVEL_CONTAINERS:
                 for child in node.children:
                     visit(child, depth + 1)
                 return
@@ -106,7 +79,7 @@ def chunk_by_functions(source: str, language: str) -> list[dict]:
             if gap_start is None:
                 gap_start = i
         else:
-            if gap_start is not None and (i - gap_start) >= GLUE_THRESHOLD:
+            if gap_start is not None:
                 gap_text = "\n".join(lines[gap_start - 1:i - 1])
                 if gap_text.strip():
                     chunks.append({
@@ -117,10 +90,8 @@ def chunk_by_functions(source: str, language: str) -> list[dict]:
                         "kind": "gap",
                     })
                 gap_start = None
-            elif gap_start is not None:
-                gap_start = None
 
-    if gap_start is not None and (len(lines) + 1 - gap_start) >= GLUE_THRESHOLD:
+    if gap_start is not None:
         gap_text = "\n".join(lines[gap_start - 1:])
         if gap_text.strip():
             chunks.append({
@@ -139,7 +110,7 @@ def chunk_by_functions(source: str, language: str) -> list[dict]:
 
 
 def get_function_body(source: str, language: str, function_name: str) -> Optional[dict]:
-    ts_lang = _TS_LANG_MAP.get(language)
+    ts_lang = TS_LANG_MAP.get(language)
     if not HAS_TREE_SITTER or not ts_lang:
         return _regex_find_function(source, language, function_name)
 
@@ -150,7 +121,7 @@ def get_function_body(source: str, language: str, function_name: str) -> Optiona
 
     source_bytes = source.encode("utf-8")
     tree = parser.parse(source_bytes)
-    func_types = _FUNC_NODE_TYPES.get(ts_lang, set())
+    func_types = FUNC_NODE_TYPES.get(ts_lang, set())
     matches = []
 
     def visit(node):
@@ -197,6 +168,26 @@ def _regex_find_function(source: str, language: str, function_name: str) -> Opti
         "csharp": rf'[\w<>\[\],\s]+\s+{re.escape(function_name)}\s*\(',
         "go": rf'func\s+(?:\(\w+\s+\*?\w+\)\s+)?{re.escape(function_name)}\s*\(',
         "php": rf'function\s+{re.escape(function_name)}\s*\(',
+        "java": rf'(?:(?:public|private|protected|static|abstract|final|synchronized)\s+)*[\w<>\[\],\s]+\s+{re.escape(function_name)}\s*\(',
+        "kotlin": rf'(?:(?:fun|class|object|interface)\s+(?:<[^>]*>\s*)?)?{re.escape(function_name)}\s*[(<]',
+        "scala": rf'def\s+{re.escape(function_name)}\s*(?:\[[^\]]*\])?\s*\(',
+        "ruby": rf'def\s+(?:self\.)?{re.escape(function_name)}[?!=]?\b',
+        "lua": rf'(?:local\s+)?function\s+[\w.:]*{re.escape(function_name)}\s*\(',
+        "swift": rf'func\s+{re.escape(function_name)}\s*(?:<[^>]*>)?\s*\(',
+        "dart": rf'[\w<>\[\]?,\s]+\s+{re.escape(function_name)}\s*\(',
+        "elixir": rf'(?:def|defp|defmacro)\s+{re.escape(function_name)}\b',
+        "haskell": rf'^{re.escape(function_name)}\s+',
+        "r": rf'{re.escape(function_name)}\s*(?:<-|=)\s*function\s*\(',
+        "julia": rf'function\s+{re.escape(function_name)}\s*(?:\{{[^}}]*\}})?\s*\(',
+        "perl": rf'sub\s+{re.escape(function_name)}\b',
+        "bash": rf'(?:function\s+)?{re.escape(function_name)}\s*\(\s*\)',
+        "zig": rf'(?:pub\s+)?fn\s+{re.escape(function_name)}\s*\(',
+        "nim": rf'(?:proc|func|method|iterator)\s+{re.escape(function_name)}\s*(?:\[[^\]]*\])?\s*\(',
+        "ocaml": rf'let\s+(?:rec\s+)?{re.escape(function_name)}\b',
+        "erlang": rf'^{re.escape(function_name)}\s*\(',
+        "objective_c": rf'[-+]\s*\([^)]*\)\s*{re.escape(function_name)}\b|[\w*&\s]+\b{re.escape(function_name)}\s*\(',
+        "proto": rf'(?:message|service|rpc)\s+{re.escape(function_name)}\b',
+        "sql": rf'CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|FUNCTION|PROCEDURE)\s+(?:IF\s+NOT\s+EXISTS\s+)?{re.escape(function_name)}\b',
     }
     pattern = patterns.get(language)
     if not pattern:
@@ -218,7 +209,9 @@ def _regex_find_function(source: str, language: str, function_name: str) -> Opti
 
 
 def _find_block_end(lines: list[str], start: int, language: str) -> int:
-    if language == "python":
+    block_style = LANGUAGES.get(language, {}).get("block_style")
+
+    if block_style == "indent" or language == "python":
         base_indent = len(lines[start]) - len(lines[start].lstrip())
         for i in range(start + 1, len(lines)):
             stripped = lines[i].strip()
@@ -229,15 +222,30 @@ def _find_block_end(lines: list[str], start: int, language: str) -> int:
                 return i - 1
         return len(lines) - 1
 
-    depth = 0
-    found_open = False
-    for i in range(start, len(lines)):
-        for ch in lines[i]:
-            if ch == '{':
-                depth += 1
-                found_open = True
-            elif ch == '}':
+    elif block_style == "end_keyword" or language in ("ruby", "lua", "elixir", "julia"):
+        depth = 0
+        openers = re.compile(r'\b(?:def|do|class|module|if|unless|case|while|for|begin|fun|function|struct)\b')
+        for i in range(start, len(lines)):
+            stripped = lines[i].strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            depth += len(openers.findall(stripped))
+            if stripped == 'end' or stripped.startswith('end ') or stripped.startswith('end;') or stripped.startswith('end)'):
                 depth -= 1
-                if found_open and depth == 0:
+                if depth <= 0:
                     return i
-    return min(start + 50, len(lines) - 1)
+        return min(start + 50, len(lines) - 1)
+
+    else:
+        depth = 0
+        found_open = False
+        for i in range(start, len(lines)):
+            for ch in lines[i]:
+                if ch == '{':
+                    depth += 1
+                    found_open = True
+                elif ch == '}':
+                    depth -= 1
+                    if found_open and depth == 0:
+                        return i
+        return min(start + 50, len(lines) - 1)

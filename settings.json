@@ -1,4 +1,9 @@
 {
+  "permissions": {
+    "allow": [
+      "MCP(code-RAG:*)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {

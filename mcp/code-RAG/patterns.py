@@ -1,15 +1,8 @@
 import re
 import os
 from pathlib import Path
-from symbols import IGNORE_DIRS, CODE_EXTENSIONS
-
-
-def _ext_to_lang(ext: str) -> str:
-    return {
-        ".rs": "rust", ".ts": "typescript", ".tsx": "typescript",
-        ".js": "javascript", ".jsx": "javascript",
-        ".vue": "vue", ".py": "python",
-    }.get(ext, "")
+from lang_registry import ext_to_lang, SUPPORTED_EXTENSIONS
+from file_walker import walk_code_files
 
 
 def _check_unbounded(content: str, file_path: str, language: str) -> list[dict]:
@@ -173,7 +166,7 @@ def _check_deep_nesting(content: str, file_path: str, language: str) -> list[dic
     results = []
     lines = content.split("\n")
 
-    if language in ("rust", "typescript", "javascript", "vue"):
+    if language in ("rust", "typescript", "javascript", "vue", "java", "kotlin", "scala", "csharp", "go", "php", "c", "cpp", "dart", "swift"):
         depth = 0
         for i, line in enumerate(lines, 1):
             for ch in line:
@@ -189,7 +182,7 @@ def _check_deep_nesting(content: str, file_path: str, language: str) -> list[dic
                 elif ch == '}':
                     depth -= 1
 
-    elif language == "python":
+    elif language in ("python", "nim", "haskell"):
         for i, line in enumerate(lines, 1):
             if not line.strip():
                 continue
@@ -264,7 +257,7 @@ def _check_magic_numbers(content: str, file_path: str, language: str) -> list[di
 def _check_error_swallow(content: str, file_path: str, language: str) -> list[dict]:
     results = []
 
-    if language in ("typescript", "javascript", "vue"):
+    if language in ("typescript", "javascript", "vue", "java", "kotlin", "scala", "csharp", "dart"):
         for m in re.finditer(r'\bcatch\s*\([^)]*\)\s*\{\s*\}', content):
             line = content[:m.start()].count("\n") + 1
             results.append({
@@ -305,6 +298,15 @@ def _check_error_swallow(content: str, file_path: str, language: str) -> list[di
                 "message": "bare except with pass swallows error",
             })
 
+    elif language == "go":
+        for m in re.finditer(r'if\s+err\s*!=\s*nil\s*\{\s*\}', content):
+            line = content[:m.start()].count("\n") + 1
+            results.append({
+                "file": file_path, "line": line, "check": "error_swallow",
+                "severity": "error",
+                "message": "empty error check block",
+            })
+
     return results
 
 
@@ -321,44 +323,32 @@ _CHECK_REGISTRY = {
 
 
 def detect_patterns(directory: str, checks: list[str] | None = None) -> list[dict]:
-    root = Path(directory)
     active_checks = checks if checks else list(_CHECK_REGISTRY.keys())
     all_results = []
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
-        for fname in filenames:
-            fpath = Path(dirpath) / fname
-            if fpath.suffix not in CODE_EXTENSIONS:
-                continue
-            try:
-                if fpath.stat().st_size > 256 * 1024:
-                    continue
-            except OSError:
-                continue
+    for fpath in walk_code_files(directory):
+        lang = ext_to_lang(fpath.suffix if fpath.suffix else fpath.name)
+        if not lang or lang == "text":
+            continue
 
-            lang = _ext_to_lang(fpath.suffix)
-            if not lang:
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        if lang == "vue":
+            script_match = re.search(r'<script[^>]*>(.*?)</script>', content, re.DOTALL)
+            check_content = script_match.group(1) if script_match else content
+            check_lang = "typescript" if script_match else lang
+        else:
+            check_content = content
+            check_lang = lang
+
+        file_str = str(fpath)
+        for check_name in active_checks:
+            if check_name not in _CHECK_REGISTRY:
                 continue
-
-            try:
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                continue
-
-            if lang == "vue":
-                script_match = re.search(r'<script[^>]*>(.*?)</script>', content, re.DOTALL)
-                check_content = script_match.group(1) if script_match else content
-                check_lang = "typescript" if script_match else lang
-            else:
-                check_content = content
-                check_lang = lang
-
-            file_str = str(fpath)
-            for check_name in active_checks:
-                if check_name not in _CHECK_REGISTRY:
-                    continue
-                findings = _CHECK_REGISTRY[check_name](check_content, file_str, check_lang)
-                all_results.extend(findings)
+            findings = _CHECK_REGISTRY[check_name](check_content, file_str, check_lang)
+            all_results.extend(findings)
 
     return all_results

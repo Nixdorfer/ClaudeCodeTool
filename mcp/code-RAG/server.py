@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -17,25 +18,17 @@ logger.setLevel(logging.INFO)
 from sentence_transformers import SentenceTransformer
 from mcp.server.fastmcp import FastMCP
 from rag_engine import RAGEngine, summarize_chunk
+from lang_registry import ext_to_lang
+from file_walker import init_config, get_lib_dirs
 from analysis import (
     get_dependency_graph as _get_dep_graph,
-    find_orphan_files as _find_orphans,
-    scan_annotations as _scan_annotations,
     find_similar_code as _find_similar,
-    get_recent_changes as _get_recent,
-    get_project_summary as _get_summary,
-    analyze_diff as _analyze_diff,
     trace_cross_language as _trace_cross_lang,
-    diff_configs as _diff_configs,
-    generate_changelog as _gen_changelog,
-    save_context_snapshot as _save_snapshot,
-    load_context_snapshot as _load_snapshot,
 )
 from symbols import (
     collect_all_symbols,
     find_callers as _find_callers,
     get_type_hierarchy as _get_type_hierarchy,
-    find_dead_code as _find_dead_code,
     preview_rename as _preview_rename,
 )
 from structure import (
@@ -43,8 +36,6 @@ from structure import (
     module_map as _module_map,
     format_module_map as _format_module_map,
 )
-from complexity import find_hotspots as _find_hotspots
-from patterns import detect_patterns as _detect_patterns
 
 PROJECT_ROOT = os.environ.get("PROJECT_ROOT") or os.getcwd()
 PROJECT_DB = os.environ.get("RAG_DB_PATH") or os.path.join(PROJECT_ROOT, ".claude", "mcp", "code-RAG")
@@ -54,22 +45,30 @@ MODEL_NAME = os.environ.get("RAG_MODEL", "all-MiniLM-L6-v2")
 os.makedirs(PROJECT_DB, exist_ok=True)
 os.makedirs(GLOBAL_DB, exist_ok=True)
 
+init_config(PROJECT_ROOT)
+
 shared_model = SentenceTransformer(MODEL_NAME)
 project_engine = RAGEngine(db_path=PROJECT_DB, model=shared_model)
 global_engine = RAGEngine(db_path=GLOBAL_DB, model=shared_model)
+
+lib_engines: dict[str, RAGEngine] = {}
+for _lib_rel in get_lib_dirs():
+    _lib_name = _lib_rel.replace("/", "_").replace("\\", "_").strip("_")
+    _lib_db = os.path.join(PROJECT_DB, "libs", _lib_name)
+    os.makedirs(_lib_db, exist_ok=True)
+    lib_engines[_lib_rel] = RAGEngine(db_path=_lib_db, model=shared_model)
+    logger.info(f"Lib engine created: {_lib_rel} -> {_lib_db}")
 
 mcp = FastMCP(
     "code-RAG",
     instructions=(
         "Prefer search_code over Glob/Grep for open-ended code searches.\n"
-        "After completing each task, silently: 1) index_codebase 2) add_knowledge.\n"
-        "Knowledge: English, minimize tokens. Categories: bugfix/decision/pattern/operation/architecture.\n"
-        "Bugfix: wait for user confirmation, then add_knowledge scope=project + scope=global.\n"
-        "Others: write immediately, scope=project."
+        "After each code change: index_codebase + log to PROJECT_ROOT/.claude/plans/changes.md.\n"
+        "Do NOT add_knowledge until user confirms task complete. See skill:code-RAG knowledge.md for full workflow."
     ),
 )
 
-logger.info(f"code-RAG started | project={PROJECT_ROOT} | project_db={PROJECT_DB} | global_db={GLOBAL_DB}")
+logger.info(f"code-RAG started | project={PROJECT_ROOT} | project_db={PROJECT_DB} | global_db={GLOBAL_DB} | libs={list(lib_engines.keys())}")
 
 
 def _format_knowledge_results(results: list[dict], label: str) -> list[str]:
@@ -85,55 +84,144 @@ def _format_knowledge_results(results: list[dict], label: str) -> list[str]:
     return [f"=== {label} ===\n" + "\n\n".join(lines)]
 
 
+def _resolve_lib_engine(lib: str) -> tuple[str, RAGEngine] | None:
+    if lib in lib_engines:
+        return lib, lib_engines[lib]
+    for key, engine in lib_engines.items():
+        if key.split("/")[-1] == lib or key.split("\\")[-1] == lib:
+            return key, engine
+    return None
+
+
+def _index_lib(lib_key: str, engine: RAGEngine) -> tuple[str, dict | str]:
+    lib_abs = os.path.normpath(os.path.join(PROJECT_ROOT, lib_key))
+    if not os.path.isdir(lib_abs):
+        return lib_key, f"directory not found: {lib_abs}"
+    logger.info(f"Indexing lib: {lib_key} -> {lib_abs}")
+    return lib_key, engine.index_directory(lib_abs)
+
+
+def _index_main(target: str) -> dict:
+    result = project_engine.index_directory(target)
+    symbols = collect_all_symbols(target)
+    sym_result = project_engine.index_symbols(symbols)
+    result["symbols_indexed"] = sym_result["indexed"]
+    return result
+
+
 @mcp.tool()
-def index_codebase(directory: str = "") -> str:
+def index_codebase(directory: str = "", lib: str = "") -> str:
+    if lib:
+        resolved = _resolve_lib_engine(lib)
+        if not resolved:
+            available = ", ".join(lib_engines.keys()) if lib_engines else "(none)"
+            return f"Error: lib '{lib}' not found. Available: {available}"
+        lib_key, engine = resolved
+        lib_key, result = _index_lib(lib_key, engine)
+        if isinstance(result, str):
+            return f"Error: {result}"
+        return (
+            f"Lib '{lib_key}' indexing complete:\n"
+            f"  Total files scanned: {result['total_files']}\n"
+            f"  Files indexed (new/changed): {result['indexed']}\n"
+            f"  Files skipped (unchanged): {result['skipped_unchanged']}\n"
+            f"  Chunks created: {result['chunks_created']}"
+        )
+
     target = directory if directory else PROJECT_ROOT
     if not os.path.isdir(target):
         return f"Error: directory not found: {target}"
 
-    logger.info(f"Indexing: {target}")
-    result = project_engine.index_directory(target)
+    futures = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(lib_engines) + 1)) as pool:
+        futures["__main__"] = pool.submit(_index_main, target)
+        for lib_key, engine in lib_engines.items():
+            futures[lib_key] = pool.submit(_index_lib, lib_key, engine)
 
-    symbols = collect_all_symbols(target)
-    sym_result = project_engine.index_symbols(symbols)
+        lines = []
+        for key, future in futures.items():
+            try:
+                r = future.result()
+            except Exception as e:
+                lines.append(f"[{key}] Error: {e}")
+                continue
 
-    return (
-        f"Indexing complete:\n"
-        f"  Total files scanned: {result['total_files']}\n"
-        f"  Files indexed (new/changed): {result['indexed']}\n"
-        f"  Files skipped (unchanged): {result['skipped_unchanged']}\n"
-        f"  Chunks created: {result['chunks_created']}\n"
-        f"  Symbols indexed: {sym_result['indexed']}"
-    )
+            if key == "__main__":
+                lines.insert(0,
+                    f"[main] files={r['total_files']} indexed={r['indexed']} "
+                    f"skipped={r['skipped_unchanged']} chunks={r['chunks_created']} "
+                    f"symbols={r['symbols_indexed']}"
+                )
+            else:
+                lib_name, lib_result = r
+                if isinstance(lib_result, str):
+                    lines.append(f"[{lib_name}] Error: {lib_result}")
+                else:
+                    lines.append(
+                        f"[{lib_name}] files={lib_result['total_files']} indexed={lib_result['indexed']} "
+                        f"skipped={lib_result['skipped_unchanged']} chunks={lib_result['chunks_created']}"
+                    )
+
+    return "Indexing complete:\n" + "\n".join(lines)
 
 
 @mcp.tool()
-def search_code(query: str, top_k: int = 10, language: str = "") -> str:
+def search_code(query: str, top_k: int = 10, language: str = "", lib: str = "", scope: str = "main") -> str:
     top_k = max(1, min(30, top_k))
     lang = language if language else None
-    results = project_engine.search(query, top_k=top_k, language=lang)
 
     output_parts = []
 
-    proj_kb = [k for k in project_engine.search_knowledge(query, top_k=3) if k["score"] > 0.35]
-    glob_kb = [k for k in global_engine.search_knowledge(query, top_k=3) if k["score"] > 0.35]
-    output_parts.extend(_format_knowledge_results(proj_kb, "Project Knowledge"))
-    output_parts.extend(_format_knowledge_results(glob_kb, "Global Knowledge"))
+    if lib:
+        resolved = _resolve_lib_engine(lib)
+        if not resolved:
+            available = ", ".join(lib_engines.keys()) if lib_engines else "(none)"
+            return f"Error: lib '{lib}' not found. Available: {available}"
+        lib_key, engine = resolved
+        results = engine.search(query, top_k=top_k, language=lang)
+        if not results:
+            return f"No results in lib '{lib_key}'. Make sure it's indexed (use index_codebase with lib parameter)."
+        code_lines = []
+        for i, r in enumerate(results):
+            summary = summarize_chunk(r['content'], r['language'])
+            code_lines.append(
+                f"[{i+1}] {r['source']}:{r['start_line']}-{r['end_line']} "
+                f"({r['language']}, {r['score']:.0%}) {summary}"
+            )
+        return f"=== Lib: {lib_key} ===\n" + "\n".join(code_lines)
 
-    if not results:
-        if output_parts:
-            output_parts.append("(No code results found)")
-            return "\n\n".join(output_parts)
+    if scope in ("main", "all"):
+        proj_kb = [k for k in project_engine.search_knowledge(query, top_k=3) if k["score"] > 0.35]
+        glob_kb = [k for k in global_engine.search_knowledge(query, top_k=3) if k["score"] > 0.35]
+        output_parts.extend(_format_knowledge_results(proj_kb, "Project Knowledge"))
+        output_parts.extend(_format_knowledge_results(glob_kb, "Global Knowledge"))
+
+        results = project_engine.search(query, top_k=top_k, language=lang)
+        if results:
+            code_lines = []
+            for i, r in enumerate(results):
+                summary = summarize_chunk(r['content'], r['language'])
+                code_lines.append(
+                    f"[{i+1}] {r['source']}:{r['start_line']}-{r['end_line']} "
+                    f"({r['language']}, {r['score']:.0%}) {summary}"
+                )
+            output_parts.append("=== Main ===\n" + "\n".join(code_lines))
+
+    if scope in ("libs", "all") and lib_engines:
+        for lib_key, engine in lib_engines.items():
+            lib_results = engine.search(query, top_k=min(top_k, 5), language=lang)
+            if lib_results:
+                code_lines = []
+                for i, r in enumerate(lib_results):
+                    summary = summarize_chunk(r['content'], r['language'])
+                    code_lines.append(
+                        f"[{i+1}] {r['source']}:{r['start_line']}-{r['end_line']} "
+                        f"({r['language']}, {r['score']:.0%}) {summary}"
+                    )
+                output_parts.append(f"=== Lib: {lib_key} ===\n" + "\n".join(code_lines))
+
+    if not output_parts:
         return "No results found. Make sure the codebase has been indexed first (use index_codebase)."
-
-    code_lines = []
-    for i, r in enumerate(results):
-        summary = summarize_chunk(r['content'], r['language'])
-        code_lines.append(
-            f"[{i+1}] {r['source']}:{r['start_line']}-{r['end_line']} "
-            f"({r['language']}, {r['score']:.0%}) {summary}"
-        )
-    output_parts.append("\n".join(code_lines))
 
     return "\n\n".join(output_parts)
 
@@ -141,19 +229,50 @@ def search_code(query: str, top_k: int = 10, language: str = "") -> str:
 @mcp.tool()
 def get_index_status() -> str:
     status = project_engine.get_status()
+    parts = []
     if not status["indexed"]:
-        return "No index found. Run index_codebase to create one."
-    return (
-        f"Index status:\n"
-        f"  Total files: {status['total_files']}\n"
-        f"  Total chunks: {status['total_chunks']}"
-    )
+        parts.append("Main: No index found. Run index_codebase to create one.")
+    else:
+        parts.append(
+            f"Main index:\n"
+            f"  Total files: {status['total_files']}\n"
+            f"  Total chunks: {status['total_chunks']}"
+        )
+
+    for lib_key, engine in lib_engines.items():
+        lib_status = engine.get_status()
+        if lib_status["indexed"]:
+            parts.append(f"Lib '{lib_key}': {lib_status['total_files']} files, {lib_status['total_chunks']} chunks")
+        else:
+            parts.append(f"Lib '{lib_key}': not indexed")
+
+    return "\n".join(parts)
 
 
 @mcp.tool()
 def clear_index() -> str:
     project_engine.clear()
     return "Index cleared. Run index_codebase to rebuild."
+
+
+@mcp.tool()
+def list_libs() -> str:
+    if not lib_engines:
+        return "No external libraries configured. Add ragLibs to .mcp.json to configure."
+
+    parts = [f"Configured libraries ({len(lib_engines)}):"]
+    for lib_key, engine in lib_engines.items():
+        lib_abs = os.path.normpath(os.path.join(PROJECT_ROOT, lib_key))
+        exists = os.path.isdir(lib_abs)
+        status = engine.get_status()
+        if status["indexed"]:
+            parts.append(f"  {lib_key}: {status['total_files']} files, {status['total_chunks']} chunks")
+        elif exists:
+            parts.append(f"  {lib_key}: not indexed (directory exists)")
+        else:
+            parts.append(f"  {lib_key}: directory not found ({lib_abs})")
+
+    return "\n".join(parts)
 
 
 @mcp.tool()
@@ -284,61 +403,6 @@ def export_knowledge(scope: str = "project", category: str = "") -> str:
 
 
 @mcp.tool()
-def get_project_summary() -> str:
-    summary = _get_summary(PROJECT_ROOT, project_engine)
-
-    parts = [f"Project: {summary['project_root']}"]
-
-    idx = summary["index"]
-    sym_status = project_engine.get_symbol_status()
-    sym_str = f", {sym_status['total_symbols']} symbols" if sym_status["indexed"] else ""
-    parts.append(f"Index: {idx['total_files']} files, {idx['total_chunks']} chunks{sym_str}")
-
-    kb = summary["knowledge"]
-    if kb["has_knowledge"]:
-        parts.append(f"Knowledge: {kb['total_entries']} entries ({', '.join(kb['categories'])})")
-
-    if summary["language_distribution"]:
-        lang_lines = [f"  {lang}: {count} chunks" for lang, count in
-                      sorted(summary["language_distribution"].items(), key=lambda x: -x[1])[:8]]
-        parts.append("Languages:\n" + "\n".join(lang_lines))
-
-    if summary["recent_knowledge"]:
-        kb_lines = [f"  [{e['category']}] {e['title']}" for e in summary["recent_knowledge"]]
-        parts.append("Recent knowledge:\n" + "\n".join(kb_lines))
-
-    git = summary["recent_git"]
-    if "error" not in git:
-        if git.get("hot_files"):
-            hot_lines = [f"  {f['file']} ({f['changes']}x)" for f in git["hot_files"][:10]]
-            parts.append("Hot files (most changed):\n" + "\n".join(hot_lines))
-        if git.get("uncommitted"):
-            parts.append(f"Uncommitted changes:\n  {git['uncommitted'][:500]}")
-
-    return "\n\n".join(parts)
-
-
-@mcp.tool()
-def get_recent_changes(count: int = 20) -> str:
-    result = _get_recent(PROJECT_ROOT, count=count)
-    if "error" in result:
-        return f"Error: {result['error']}"
-
-    parts = []
-    if result.get("log"):
-        parts.append(f"=== Recent {count} Commits ===\n{result['log']}")
-
-    if result.get("uncommitted"):
-        parts.append(f"=== Uncommitted Changes ===\n{result['uncommitted']}")
-
-    if result.get("hot_files"):
-        lines = [f"  {f['file']} ({f['changes']}x)" for f in result["hot_files"]]
-        parts.append("=== Hot Files ===\n" + "\n".join(lines))
-
-    return "\n\n".join(parts) if parts else "No git history found."
-
-
-@mcp.tool()
 def get_dependency_graph(file_path: str) -> str:
     abs_path = file_path if os.path.isabs(file_path) else os.path.join(PROJECT_ROOT, file_path)
     result = _get_dep_graph(abs_path, PROJECT_ROOT)
@@ -367,18 +431,6 @@ def get_dependency_graph(file_path: str) -> str:
 
 
 @mcp.tool()
-def find_orphans() -> str:
-    result = _find_orphans(PROJECT_ROOT)
-
-    if not result["orphans"]:
-        return f"No orphan files found among {result['total_files']} files."
-
-    lines = [f for f in result["orphans"]]
-    header = f"Found {result['orphan_count']} potentially orphaned files (out of {result['total_files']}):"
-    return header + "\n" + "\n".join(f"  {f}" for f in lines[:50])
-
-
-@mcp.tool()
 def find_similar_code(code_snippet: str, top_k: int = 10) -> str:
     top_k = max(1, min(30, top_k))
     results = _find_similar(code_snippet, project_engine, top_k=top_k)
@@ -394,27 +446,6 @@ def find_similar_code(code_snippet: str, top_k: int = 10) -> str:
             f"({r['language']}, {r['score']:.0%}) {summary}"
         )
     return "\n".join(lines)
-
-
-@mcp.tool()
-def scan_annotations(annotation_type: str = "") -> str:
-    results = _scan_annotations(PROJECT_ROOT, annotation_type=annotation_type)
-
-    if not results:
-        filter_msg = f" of type '{annotation_type}'" if annotation_type else ""
-        return f"No annotations{filter_msg} found."
-
-    by_type: dict[str, list] = {}
-    for r in results:
-        by_type.setdefault(r["type"], []).append(r)
-
-    parts = [f"Found {len(results)} annotations:"]
-    for atype, entries in sorted(by_type.items()):
-        lines = [f"  {e['file']}:{e['line']} — {e['text']}" for e in entries[:20]]
-        overflow = f"\n  ... and {len(entries) - 20} more" if len(entries) > 20 else ""
-        parts.append(f"\n[{atype}] ({len(entries)})\n" + "\n".join(lines) + overflow)
-
-    return "\n".join(parts)
 
 
 @mcp.tool()
@@ -517,29 +548,6 @@ def find_callers(symbol_name: str, language: str = "") -> str:
 
 
 @mcp.tool()
-def diff_analysis(ref: str = "") -> str:
-    result = _analyze_diff(PROJECT_ROOT, ref=ref)
-    if "error" in result:
-        return f"Error: {result['error']}"
-
-    parts = [f"Diff against: {result['ref']}", f"Files changed: {result['files_changed']} (+{result['insertions']} -{result['deletions']})"]
-
-    for cf in result["changed_files"][:30]:
-        sym_str = ""
-        if cf["affected_symbols"]:
-            sym_names = [f"{s['name']}({s['kind']})" for s in cf["affected_symbols"][:5]]
-            sym_str = f"  affected: {', '.join(sym_names)}"
-        parts.append(f"  {cf['file']} (+{cf['insertions']} -{cf['deletions']}){sym_str}")
-
-    if result["impact"]:
-        parts.append(f"\nImpacted files ({len(result['impact'])}):")
-        for f in result["impact"][:20]:
-            parts.append(f"  {f}")
-
-    return "\n".join(parts)
-
-
-@mcp.tool()
 def type_hierarchy(type_name: str = "") -> str:
     result = _get_type_hierarchy(PROJECT_ROOT)
     types = result["types"]
@@ -585,45 +593,6 @@ def type_hierarchy(type_name: str = "") -> str:
 
 
 @mcp.tool()
-def find_dead_code(language: str = "") -> str:
-    results = _find_dead_code(PROJECT_ROOT, language=language)
-    if not results:
-        return "No dead code found (or project is small enough that all functions are referenced)."
-
-    by_lang: dict[str, list] = {}
-    for r in results:
-        by_lang.setdefault(r["language"], []).append(r)
-
-    parts = [f"Found {len(results)} potentially dead functions:"]
-    for lang, entries in sorted(by_lang.items()):
-        parts.append(f"\n[{lang}] ({len(entries)})")
-        for e in entries[:30]:
-            parts.append(f"  {e['file']}:{e['line']} [{e['kind']}] {e['name']}")
-        if len(entries) > 30:
-            parts.append(f"  ... and {len(entries) - 30} more")
-
-    return "\n".join(parts)
-
-
-@mcp.tool()
-def complexity_hotspots(directory: str = "", top_n: int = 30) -> str:
-    target = os.path.join(PROJECT_ROOT, directory) if directory else PROJECT_ROOT
-    results = _find_hotspots(target, top_n=top_n)
-
-    if not results:
-        return "No functions found to analyze."
-
-    parts = [f"Top {len(results)} most complex functions:"]
-    for i, r in enumerate(results):
-        parts.append(
-            f"[{i+1}] {r['name']} (complexity={r['complexity']}, nesting={r['nesting_depth']}, lines={r['lines']})\n"
-            f"     {r['file']}:{r['line']} ({r.get('language', '')})"
-        )
-
-    return "\n".join(parts)
-
-
-@mcp.tool()
 def cross_language_trace(symbol_name: str) -> str:
     result = _trace_cross_lang(symbol_name, PROJECT_ROOT)
 
@@ -652,95 +621,6 @@ def cross_language_trace(symbol_name: str) -> str:
     return "\n".join(parts)
 
 
-@mcp.tool()
-def config_diff() -> str:
-    result = _diff_configs(PROJECT_ROOT)
-
-    changed = [c for c in result["configs"] if c["has_changes"]]
-    if not changed:
-        return f"No config changes detected ({len(result['configs'])} config files checked)."
-
-    parts = [f"{len(changed)} config file(s) changed:"]
-    for c in changed:
-        parts.append(f"\n{c['file']} ({c['diff_summary']})")
-        if c["added_deps"]:
-            parts.append(f"  + deps: {', '.join(c['added_deps'])}")
-        if c["removed_deps"]:
-            parts.append(f"  - deps: {', '.join(c['removed_deps'])}")
-        if c["changed_settings"]:
-            parts.append(f"  settings: {', '.join(c['changed_settings'])}")
-
-    return "\n".join(parts)
-
-
-@mcp.tool()
-def detect_antipatterns(checks: str = "", directory: str = "") -> str:
-    target = os.path.join(PROJECT_ROOT, directory) if directory else PROJECT_ROOT
-    check_list = [c.strip() for c in checks.split(",") if c.strip()] if checks else None
-    results = _detect_patterns(target, checks=check_list)
-
-    if not results:
-        return "No anti-patterns detected."
-
-    by_check: dict[str, list] = {}
-    for r in results:
-        by_check.setdefault(r["check"], []).append(r)
-
-    parts = [f"Found {len(results)} findings:"]
-    for check, entries in sorted(by_check.items()):
-        sev_counts = {}
-        for e in entries:
-            sev_counts[e["severity"]] = sev_counts.get(e["severity"], 0) + 1
-        sev_str = ", ".join(f"{v} {k}" for k, v in sorted(sev_counts.items()))
-        parts.append(f"\n[{check}] ({len(entries)}: {sev_str})")
-        for e in entries[:15]:
-            parts.append(f"  [{e['severity']}] {e['file']}:{e['line']} — {e['message']}")
-        if len(entries) > 15:
-            parts.append(f"  ... and {len(entries) - 15} more")
-
-    return "\n".join(parts)
-
-
-@mcp.tool()
-def changelog(since: str = "", count: int = 50) -> str:
-    return _gen_changelog(PROJECT_ROOT, since=since, count=count)
-
-
-@mcp.tool()
-def save_context(active_files: str = "", current_task: str = "", notes: str = "") -> str:
-    data: dict = {}
-    if active_files:
-        data["active_files"] = [f.strip() for f in active_files.split(",") if f.strip()]
-    if current_task:
-        data["current_task"] = current_task
-    if notes:
-        data["notes"] = notes
-
-    path = _save_snapshot(PROJECT_ROOT, data)
-    return f"Context saved to {path}"
-
-
-@mcp.tool()
-def load_context() -> str:
-    data = _load_snapshot(PROJECT_ROOT)
-    if "error" in data:
-        return f"No saved context found."
-
-    parts = []
-    if data.get("_branch"):
-        parts.append(f"Branch: {data['_branch']}")
-    if data.get("_timestamp"):
-        import time
-        ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(data["_timestamp"]))
-        parts.append(f"Saved: {ts}")
-    if data.get("current_task"):
-        parts.append(f"Task: {data['current_task']}")
-    if data.get("active_files"):
-        parts.append(f"Active files:\n" + "\n".join(f"  {f}" for f in data["active_files"]))
-    if data.get("notes"):
-        parts.append(f"Notes: {data['notes']}")
-
-    return "\n".join(parts) if parts else "Context loaded but empty."
 
 
 @mcp.tool()
@@ -785,8 +665,7 @@ def get_function_body(function_name: str, file_path: str = "", language: str = "
             content = open(abs_path, encoding="utf-8", errors="ignore").read()
         except Exception as e:
             return f"Error reading file: {e}"
-        from rag_engine import _ext_to_lang
-        lang = language if language else _ext_to_lang(os.path.splitext(abs_path)[1])
+        lang = language if language else ext_to_lang(os.path.splitext(abs_path)[1])
         result = _get_body(content, lang, function_name)
         if result:
             return f"{abs_path}:{result['start_line']}-{result['end_line']} [{result['kind']}]\n{result['content']}"
@@ -806,8 +685,7 @@ def get_function_body(function_name: str, file_path: str = "", language: str = "
             content = open(sym["file"], encoding="utf-8", errors="ignore").read()
         except Exception:
             continue
-        from rag_engine import _ext_to_lang
-        lang = language if language else _ext_to_lang(os.path.splitext(sym["file"])[1])
+        lang = language if language else ext_to_lang(os.path.splitext(sym["file"])[1])
         result = _get_body(content, lang, function_name)
         if result:
             parts.append(f"{sym['file']}:{result['start_line']}-{result['end_line']} [{result['kind']}]\n{result['content']}")

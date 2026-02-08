@@ -1,20 +1,11 @@
 import re
-import os
 import logging
 from pathlib import Path
-from typing import Optional
+
+from lang_registry import ext_to_lang, SUPPORTED_EXTENSIONS, LANGUAGES
+from file_walker import walk_code_files
 
 logger = logging.getLogger(__name__)
-
-IGNORE_DIRS = {
-    "node_modules", ".git", "target", "dist", "build",
-    "__pycache__", ".cache", "pkg", "wasm-pack-out",
-    ".claude", "venv", ".venv", "env", ".env",
-    "runtime", ".idea", ".vscode", ".next",
-    "coverage", ".nyc_output", ".turbo",
-}
-
-CODE_EXTENSIONS = {".rs", ".ts", ".tsx", ".js", ".jsx", ".vue", ".py"}
 
 TS_PATTERNS = {
     "function": re.compile(
@@ -93,19 +84,275 @@ PY_PATTERNS = {
     ),
 }
 
+JAVA_PATTERNS = {
+    "method": re.compile(
+        r'^\s*(?:(?:public|private|protected|static|abstract|final|synchronized|native)\s+)*(?:[\w<>\[\],.\s]+)\s+(\w+)\s*\(([^)]*)\)(?:\s*throws\s+[\w,\s]+)?\s*[{;]',
+        re.MULTILINE,
+    ),
+    "class": re.compile(
+        r'^\s*(?:(?:public|private|protected|static|abstract|final)\s+)*(?:class|interface|enum|@interface)\s+(\w+)(?:\s+extends\s+(\w+))?(?:\s+implements\s+([^\{]+?))?',
+        re.MULTILINE,
+    ),
+}
 
-def _get_lang(ext: str) -> str:
-    return {
-        ".rs": "rust", ".ts": "typescript", ".tsx": "typescript",
-        ".js": "javascript", ".jsx": "javascript",
-        ".vue": "vue", ".py": "python",
-    }.get(ext, "")
+KOTLIN_PATTERNS = {
+    "function": re.compile(
+        r'^\s*(?:(?:public|private|protected|internal|override|open|abstract|suspend|inline|infix|operator|tailrec)\s+)*fun\s+(?:<[^>]*>\s*)?(\w+)\s*\(([^)]*)\)(?:\s*:\s*([^\{=]+?))?(?:\s*[{=])',
+        re.MULTILINE,
+    ),
+    "class": re.compile(
+        r'^\s*(?:(?:public|private|protected|internal|open|abstract|sealed|data|enum|inner|annotation|value)\s+)*(?:class|interface|object)\s+(\w+)(?:\s*(?::\s*([^\{]+?))?)?(?:\s*[{(]|$)',
+        re.MULTILINE,
+    ),
+}
+
+GO_PATTERNS = {
+    "function": re.compile(
+        r'^\s*func\s+(?:\(\w+\s+\*?(\w+)\)\s+)?(\w+)\s*\(([^)]*)\)(?:\s*(?:\([^)]*\)|[\w*\[\]]+))?(?:\s*\{)',
+        re.MULTILINE,
+    ),
+    "type": re.compile(
+        r'^\s*type\s+(\w+)\s+(struct|interface)',
+        re.MULTILINE,
+    ),
+}
+
+C_PATTERNS = {
+    "function": re.compile(
+        r'^\s*(?:static\s+|inline\s+|extern\s+)*[\w*&\s]+\b(\w+)\s*\([^)]*\)\s*(?:const\s*)?[{]',
+        re.MULTILINE,
+    ),
+    "struct": re.compile(
+        r'^\s*(?:typedef\s+)?(?:struct|enum|union)\s+(\w+)',
+        re.MULTILINE,
+    ),
+}
+
+CPP_PATTERNS = {
+    "function": re.compile(
+        r'^\s*(?:virtual\s+|static\s+|inline\s+|explicit\s+|extern\s+|constexpr\s+)*[\w:*&<>\s]+?\b(\w+)\s*\([^)]*\)\s*(?:const\s*)?(?:override\s*)?(?:noexcept\s*)?(?:final\s*)?[{;]',
+        re.MULTILINE,
+    ),
+    "class": re.compile(
+        r'^\s*(?:template\s*<[^>]*>\s*)?(?:class|struct|enum\s+class|enum|namespace)\s+(\w+)',
+        re.MULTILINE,
+    ),
+}
+
+CSHARP_PATTERNS = {
+    "method": re.compile(
+        r'^\s*(?:(?:public|private|protected|internal|static|virtual|override|async|abstract|sealed|new|partial)\s+)*[\w<>\[\],\s]+\s+(\w+)\s*\([^)]*\)\s*[{;]',
+        re.MULTILINE,
+    ),
+    "class": re.compile(
+        r'^\s*(?:(?:public|private|protected|internal|static|abstract|sealed|partial)\s+)*(?:class|struct|enum|interface|record|namespace)\s+(\w+)',
+        re.MULTILINE,
+    ),
+}
+
+PHP_PATTERNS = {
+    "function": re.compile(
+        r'^\s*(?:(?:public|private|protected|static|abstract|final)\s+)*function\s+(\w+)\s*\([^)]*\)',
+        re.MULTILINE,
+    ),
+    "class": re.compile(
+        r'^\s*(?:(?:abstract|final)\s+)?(?:class|interface|trait|enum)\s+(\w+)',
+        re.MULTILINE,
+    ),
+}
+
+RUBY_PATTERNS = {
+    "method": re.compile(
+        r'^\s*def\s+(self\.)?(\w+[?!=]?)',
+        re.MULTILINE,
+    ),
+    "class": re.compile(
+        r'^\s*(?:class|module)\s+(\w+(?:::\w+)*)',
+        re.MULTILINE,
+    ),
+}
+
+SCALA_PATTERNS = {
+    "function": re.compile(
+        r'^\s*(?:override\s+)?(?:private|protected)?\s*def\s+(\w+)\s*(?:\[[^\]]*\])?\s*\(([^)]*)\)(?:\s*:\s*([^\{=]+?))?',
+        re.MULTILINE,
+    ),
+    "class": re.compile(
+        r'^\s*(?:abstract\s+|sealed\s+|case\s+|final\s+)*(?:class|object|trait)\s+(\w+)',
+        re.MULTILINE,
+    ),
+}
+
+SWIFT_PATTERNS = {
+    "function": re.compile(
+        r'^\s*(?:(?:public|private|internal|fileprivate|open|override|static|class|mutating)\s+)*func\s+(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)',
+        re.MULTILINE,
+    ),
+    "class": re.compile(
+        r'^\s*(?:(?:public|private|internal|fileprivate|open|final)\s+)*(?:class|struct|enum|protocol|extension|actor)\s+(\w+)',
+        re.MULTILINE,
+    ),
+}
+
+DART_PATTERNS = {
+    "function": re.compile(
+        r'^\s*(?:(?:static|abstract|external|factory)\s+)*[\w<>\[\]?,\s]+\s+(\w+)\s*\([^)]*\)\s*(?:async\s*)?[{;]',
+        re.MULTILINE,
+    ),
+    "class": re.compile(
+        r'^\s*(?:abstract\s+)?(?:class|mixin|enum|extension|typedef)\s+(\w+)',
+        re.MULTILINE,
+    ),
+}
+
+ELIXIR_PATTERNS = {
+    "function": re.compile(
+        r'^\s*(?:def|defp|defmacro|defmacrop)\s+(\w+)',
+        re.MULTILINE,
+    ),
+    "module": re.compile(
+        r'^\s*defmodule\s+([\w.]+)',
+        re.MULTILINE,
+    ),
+}
+
+LUA_PATTERNS = {
+    "function": re.compile(
+        r'^\s*(?:local\s+)?function\s+([\w.:]+)\s*\(',
+        re.MULTILINE,
+    ),
+}
+
+BASH_PATTERNS = {
+    "function": re.compile(
+        r'^\s*(?:function\s+)?(\w+)\s*\(\s*\)\s*\{',
+        re.MULTILINE,
+    ),
+}
+
+PERL_PATTERNS = {
+    "function": re.compile(
+        r'^\s*sub\s+(\w+)',
+        re.MULTILINE,
+    ),
+    "package": re.compile(
+        r'^\s*package\s+([\w:]+)',
+        re.MULTILINE,
+    ),
+}
+
+HASKELL_PATTERNS = {
+    "signature": re.compile(
+        r'^(\w+)\s*::\s*(.+)$',
+        re.MULTILINE,
+    ),
+    "type": re.compile(
+        r'^\s*(?:data|newtype|type|class|instance)\s+(\w+)',
+        re.MULTILINE,
+    ),
+}
+
+R_PATTERNS = {
+    "function": re.compile(
+        r'^(\w+)\s*(?:<-|=)\s*function\s*\(',
+        re.MULTILINE,
+    ),
+}
+
+JULIA_PATTERNS = {
+    "function": re.compile(
+        r'^\s*function\s+(\w+)\s*(?:\{[^}]*\})?\s*\(',
+        re.MULTILINE,
+    ),
+    "type": re.compile(
+        r'^\s*(?:mutable\s+)?(?:struct|abstract\s+type|module)\s+(\w+)',
+        re.MULTILINE,
+    ),
+}
+
+ZIG_PATTERNS = {
+    "function": re.compile(
+        r'^\s*(?:pub\s+)?fn\s+(\w+)\s*\(',
+        re.MULTILINE,
+    ),
+    "type": re.compile(
+        r'^\s*(?:pub\s+)?const\s+(\w+)\s*=\s*(?:struct|enum|union)\s*[{(]',
+        re.MULTILINE,
+    ),
+}
+
+NIM_PATTERNS = {
+    "function": re.compile(
+        r'^\s*(?:proc|func|method|iterator|template|macro)\s+(\w+)\s*(?:\[[^\]]*\])?\s*\(',
+        re.MULTILINE,
+    ),
+    "type": re.compile(
+        r'^\s*type\s+(\w+)',
+        re.MULTILINE,
+    ),
+}
+
+OCAML_PATTERNS = {
+    "let": re.compile(
+        r'^\s*let\s+(?:rec\s+)?(\w+)',
+        re.MULTILINE,
+    ),
+    "module": re.compile(
+        r'^\s*module\s+(\w+)',
+        re.MULTILINE,
+    ),
+    "type": re.compile(
+        r'^\s*type\s+(\w+)',
+        re.MULTILINE,
+    ),
+}
+
+ERLANG_PATTERNS = {
+    "function": re.compile(
+        r'^(\w+)\s*\([^)]*\)\s*->',
+        re.MULTILINE,
+    ),
+    "module": re.compile(
+        r'^-module\((\w+)\)',
+        re.MULTILINE,
+    ),
+}
+
+OBJC_PATTERNS = {
+    "method": re.compile(
+        r'^[-+]\s*\([^)]*\)\s*(\w+)',
+        re.MULTILINE,
+    ),
+    "class": re.compile(
+        r'^@(?:interface|implementation|protocol)\s+(\w+)',
+        re.MULTILINE,
+    ),
+}
+
+PROTO_PATTERNS = {
+    "message": re.compile(
+        r'^\s*(?:message|service|enum)\s+(\w+)',
+        re.MULTILINE,
+    ),
+    "rpc": re.compile(
+        r'^\s*rpc\s+(\w+)\s*\(',
+        re.MULTILINE,
+    ),
+}
+
+SQL_PATTERNS = {
+    "create": re.compile(
+        r'^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|FUNCTION|PROCEDURE|TRIGGER|INDEX|TYPE)\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)',
+        re.MULTILINE | re.IGNORECASE,
+    ),
+}
 
 
 def extract_symbols(file_path: str, content: str = "") -> list[dict]:
     ext = Path(file_path).suffix
-    lang = _get_lang(ext)
-    if not lang:
+    fname = Path(file_path).name
+    lang = ext_to_lang(fname if not ext else ext)
+    if not lang or lang == "text":
         return []
 
     if not content:
@@ -122,7 +369,6 @@ def extract_symbols(file_path: str, content: str = "") -> list[dict]:
         else:
             return []
 
-    lines = content.split("\n")
     symbols = []
 
     def _line_at(pos):
@@ -269,35 +515,121 @@ def extract_symbols(file_path: str, content: str = "") -> list[dict]:
                         "file": file_path, "language": lang,
                     })
 
+    elif lang == "java":
+        _SKIP_JAVA = {'if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'else', 'synchronized', 'try'}
+        for m in JAVA_PATTERNS["method"].finditer(content):
+            name = m.group(1)
+            if name in _SKIP_JAVA:
+                continue
+            line = _line_at(m.start())
+            params = m.group(2).strip() if m.lastindex >= 2 else ""
+            symbols.append({"name": name, "kind": "method", "line": line, "signature": f"({params})", "file": file_path, "language": lang})
+        for m in JAVA_PATTERNS["class"].finditer(content):
+            name = m.group(1)
+            line = _line_at(m.start())
+            extends = m.group(2) or ""
+            kind = "class"
+            raw = m.group(0).strip()
+            if "interface" in raw: kind = "interface"
+            elif "enum" in raw: kind = "enum"
+            symbols.append({"name": name, "kind": kind, "line": line, "signature": f"extends {extends}" if extends else "", "file": file_path, "language": lang})
+
+    elif lang == "kotlin":
+        for m in KOTLIN_PATTERNS["function"].finditer(content):
+            name = m.group(1)
+            line = _line_at(m.start())
+            params = m.group(2).strip() if m.lastindex >= 2 else ""
+            ret = (m.group(3) or "").strip() if m.lastindex >= 3 else ""
+            symbols.append({"name": name, "kind": "function", "line": line, "signature": f"({params})" + (f": {ret}" if ret else ""), "file": file_path, "language": lang})
+        for m in KOTLIN_PATTERNS["class"].finditer(content):
+            name = m.group(1)
+            line = _line_at(m.start())
+            symbols.append({"name": name, "kind": "class", "line": line, "signature": "", "file": file_path, "language": lang})
+
+    elif lang == "go":
+        for m in GO_PATTERNS["function"].finditer(content):
+            receiver = m.group(1) or ""
+            name = m.group(2)
+            line = _line_at(m.start())
+            params = m.group(3).strip() if m.lastindex >= 3 else ""
+            kind = "method" if receiver else "function"
+            symbols.append({"name": name, "kind": kind, "line": line, "signature": f"({params})", "file": file_path, "language": lang})
+        for m in GO_PATTERNS["type"].finditer(content):
+            name = m.group(1)
+            kind_str = m.group(2)
+            line = _line_at(m.start())
+            symbols.append({"name": name, "kind": kind_str, "line": line, "signature": "", "file": file_path, "language": lang})
+
+    elif lang in ("c", "cpp"):
+        pats = CPP_PATTERNS if lang == "cpp" else C_PATTERNS
+        _SKIP_C = {'if', 'for', 'while', 'switch', 'catch', 'return', 'sizeof', 'typeof', 'else', 'decltype', 'alignof'}
+        for m in pats["function"].finditer(content):
+            name = m.group(1)
+            if name in _SKIP_C:
+                continue
+            line = _line_at(m.start())
+            symbols.append({"name": name, "kind": "function", "line": line, "signature": "", "file": file_path, "language": lang})
+        struct_pat = pats.get("struct") or pats.get("class")
+        if struct_pat:
+            for m in struct_pat.finditer(content):
+                name = m.group(1)
+                line = _line_at(m.start())
+                symbols.append({"name": name, "kind": "class", "line": line, "signature": "", "file": file_path, "language": lang})
+
+    elif lang == "csharp":
+        _SKIP_CS = {'if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'else', 'foreach', 'lock', 'using', 'fixed'}
+        for m in CSHARP_PATTERNS["method"].finditer(content):
+            name = m.group(1)
+            if name in _SKIP_CS:
+                continue
+            line = _line_at(m.start())
+            symbols.append({"name": name, "kind": "method", "line": line, "signature": "", "file": file_path, "language": lang})
+        for m in CSHARP_PATTERNS["class"].finditer(content):
+            name = m.group(1)
+            line = _line_at(m.start())
+            symbols.append({"name": name, "kind": "class", "line": line, "signature": "", "file": file_path, "language": lang})
+
+    elif lang == "php":
+        for m in PHP_PATTERNS["function"].finditer(content):
+            name = m.group(1)
+            line = _line_at(m.start())
+            symbols.append({"name": name, "kind": "function", "line": line, "signature": "", "file": file_path, "language": lang})
+        for m in PHP_PATTERNS["class"].finditer(content):
+            name = m.group(1)
+            line = _line_at(m.start())
+            symbols.append({"name": name, "kind": "class", "line": line, "signature": "", "file": file_path, "language": lang})
+
+    else:
+        PATTERN_MAP = {
+            "ruby": RUBY_PATTERNS, "scala": SCALA_PATTERNS, "swift": SWIFT_PATTERNS,
+            "dart": DART_PATTERNS, "elixir": ELIXIR_PATTERNS, "lua": LUA_PATTERNS,
+            "bash": BASH_PATTERNS, "perl": PERL_PATTERNS, "haskell": HASKELL_PATTERNS,
+            "r": R_PATTERNS, "julia": JULIA_PATTERNS, "zig": ZIG_PATTERNS,
+            "nim": NIM_PATTERNS, "ocaml": OCAML_PATTERNS, "erlang": ERLANG_PATTERNS,
+            "objective_c": OBJC_PATTERNS, "proto": PROTO_PATTERNS, "sql": SQL_PATTERNS,
+        }
+        pats = PATTERN_MAP.get(lang)
+        if not pats:
+            return symbols
+        for kind_key, pat in pats.items():
+            kind = "function" if kind_key in ("method", "function", "signature", "let", "create", "rpc") else "class" if kind_key in ("class", "module", "type", "message", "package") else kind_key
+            for m in pat.finditer(content):
+                name = m.group(1) if not (lang == "ruby" and kind_key == "method") else (m.group(2) if m.lastindex >= 2 else m.group(1))
+                line = _line_at(m.start())
+                symbols.append({"name": name, "kind": kind, "line": line, "signature": "", "file": file_path, "language": lang})
+
     return symbols
 
 
 def collect_all_symbols(project_root: str) -> list[dict]:
-    root = Path(project_root)
     all_symbols = []
-
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
-        for fname in filenames:
-            fpath = Path(dirpath) / fname
-            if fpath.suffix not in CODE_EXTENSIONS:
-                continue
-            try:
-                if fpath.stat().st_size > 256 * 1024:
-                    continue
-            except OSError:
-                continue
-
-            syms = extract_symbols(str(fpath))
-            all_symbols.extend(syms)
-
+    for fpath in walk_code_files(project_root):
+        syms = extract_symbols(str(fpath))
+        all_symbols.extend(syms)
     return all_symbols
 
 
 def find_callers(symbol_name: str, project_root: str, lang_filter: str = "") -> list[dict]:
-    root = Path(project_root)
-    callers = []
-
     call_patterns = [
         re.compile(rf'\b{re.escape(symbol_name)}\s*\('),
         re.compile(rf'\b{re.escape(symbol_name)}\s*<[^>]*>\s*\('),
@@ -310,35 +642,20 @@ def find_callers(symbol_name: str, project_root: str, lang_filter: str = "") -> 
         re.compile(rf'^\s*(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|enum|const|let|var)\s+{re.escape(symbol_name)}\b', re.MULTILINE),
     ]
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
-        for fname in filenames:
-            fpath = Path(dirpath) / fname
-            if fpath.suffix not in CODE_EXTENSIONS:
+    callers = []
+    for fpath in walk_code_files(project_root, lang_filter=lang_filter):
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        for line_num, line in enumerate(content.split("\n"), 1):
+            is_def = any(p.search(line) for p in def_patterns)
+            if is_def:
                 continue
-            if lang_filter:
-                file_lang = _get_lang(fpath.suffix)
-                if file_lang != lang_filter:
-                    continue
-            try:
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                continue
-
-            for line_num, line in enumerate(content.split("\n"), 1):
-                is_def = any(p.search(line) for p in def_patterns)
-                if is_def:
-                    continue
-
-                for cp in call_patterns:
-                    if cp.search(line):
-                        callers.append({
-                            "file": str(fpath),
-                            "line": line_num,
-                            "text": line.strip()[:120],
-                        })
-                        break
-
+            for cp in call_patterns:
+                if cp.search(line):
+                    callers.append({"file": str(fpath), "line": line_num, "text": line.strip()[:120]})
+                    break
     return callers
 
 
@@ -380,125 +697,114 @@ def get_type_hierarchy(project_root: str) -> dict:
     def _line_at(content, pos):
         return content[:pos].count("\n") + 1
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
-        for fname in filenames:
-            fpath = Path(dirpath) / fname
-            if fpath.suffix not in CODE_EXTENSIONS:
-                continue
-            try:
-                if fpath.stat().st_size > 256 * 1024:
+    for fpath in walk_code_files(project_root):
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        lang = ext_to_lang(fpath.suffix if fpath.suffix else fpath.name)
+        fstr = str(fpath)
+
+        if lang == "rust":
+            for m in _RUST_DEF_KIND_RE.finditer(content):
+                kind = m.group(1)
+                name = m.group(2)
+                _ensure_type(name, kind, fstr, _line_at(content, m.start()))
+
+            for m in _IMPL_FOR_RE.finditer(content):
+                trait_name = m.group(1)
+                type_name = m.group(2)
+                line = _line_at(content, m.start())
+                _ensure_type(type_name)
+                _ensure_type(trait_name, "trait")
+                if trait_name not in types[type_name]["implements"]:
+                    types[type_name]["implements"].append(trait_name)
+                edges.append({
+                    "from": type_name, "to": trait_name,
+                    "relation": "implements", "file": fstr, "line": line,
+                })
+
+        elif lang in ("typescript", "javascript") or (lang == "vue"):
+            if lang == "vue":
+                script_match = re.search(r'<script[^>]*>(.*?)</script>', content, re.DOTALL)
+                if script_match:
+                    content = script_match.group(1)
+                else:
                     continue
-            except OSError:
-                continue
 
-            try:
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                continue
+            for m in TS_PATTERNS["class"].finditer(content):
+                name = m.group(1)
+                extends = m.group(2) or ""
+                implements_raw = (m.group(3) or "").strip()
+                line = _line_at(content, m.start())
+                _ensure_type(name, "class", fstr, line)
 
-            lang = _get_lang(fpath.suffix)
-            fstr = str(fpath)
-
-            if lang == "rust":
-                for m in _RUST_DEF_KIND_RE.finditer(content):
-                    kind = m.group(1)
-                    name = m.group(2)
-                    _ensure_type(name, kind, fstr, _line_at(content, m.start()))
-
-                for m in _IMPL_FOR_RE.finditer(content):
-                    trait_name = m.group(1)
-                    type_name = m.group(2)
-                    line = _line_at(content, m.start())
-                    _ensure_type(type_name)
-                    _ensure_type(trait_name, "trait")
-                    if trait_name not in types[type_name]["implements"]:
-                        types[type_name]["implements"].append(trait_name)
+                if extends:
+                    extends = extends.strip()
+                    _ensure_type(extends)
+                    if extends not in types[name]["extends"]:
+                        types[name]["extends"].append(extends)
                     edges.append({
-                        "from": type_name, "to": trait_name,
-                        "relation": "implements", "file": fstr, "line": line,
+                        "from": name, "to": extends,
+                        "relation": "extends", "file": fstr, "line": line,
                     })
 
-            elif lang in ("typescript", "javascript") or (lang == "vue"):
-                if lang == "vue":
-                    script_match = re.search(r'<script[^>]*>(.*?)</script>', content, re.DOTALL)
-                    if script_match:
-                        content = script_match.group(1)
-                    else:
-                        continue
-
-                for m in TS_PATTERNS["class"].finditer(content):
-                    name = m.group(1)
-                    extends = m.group(2) or ""
-                    implements_raw = (m.group(3) or "").strip()
-                    line = _line_at(content, m.start())
-                    _ensure_type(name, "class", fstr, line)
-
-                    if extends:
-                        extends = extends.strip()
-                        _ensure_type(extends)
-                        if extends not in types[name]["extends"]:
-                            types[name]["extends"].append(extends)
+                if implements_raw:
+                    for iface in re.split(r'\s*,\s*', implements_raw):
+                        iface = iface.strip().split("<")[0].strip()
+                        if not iface:
+                            continue
+                        _ensure_type(iface, "interface")
+                        if iface not in types[name]["implements"]:
+                            types[name]["implements"].append(iface)
                         edges.append({
-                            "from": name, "to": extends,
+                            "from": name, "to": iface,
+                            "relation": "implements", "file": fstr, "line": line,
+                        })
+
+            for m in TS_PATTERNS["interface"].finditer(content):
+                name = m.group(1)
+                extends_raw = (m.group(2) or "").strip()
+                line = _line_at(content, m.start())
+                _ensure_type(name, "interface", fstr, line)
+
+                if extends_raw:
+                    for base in re.split(r'\s*,\s*', extends_raw):
+                        base = base.strip().split("<")[0].strip()
+                        if not base:
+                            continue
+                        _ensure_type(base, "interface")
+                        if base not in types[name]["extends"]:
+                            types[name]["extends"].append(base)
+                        edges.append({
+                            "from": name, "to": base,
                             "relation": "extends", "file": fstr, "line": line,
                         })
 
-                    if implements_raw:
-                        for iface in re.split(r'\s*,\s*', implements_raw):
-                            iface = iface.strip().split("<")[0].strip()
-                            if not iface:
-                                continue
-                            _ensure_type(iface, "interface")
-                            if iface not in types[name]["implements"]:
-                                types[name]["implements"].append(iface)
-                            edges.append({
-                                "from": name, "to": iface,
-                                "relation": "implements", "file": fstr, "line": line,
-                            })
+            for m in TS_PATTERNS["enum"].finditer(content):
+                name = m.group(1)
+                _ensure_type(name, "enum", fstr, _line_at(content, m.start()))
 
-                for m in TS_PATTERNS["interface"].finditer(content):
-                    name = m.group(1)
-                    extends_raw = (m.group(2) or "").strip()
-                    line = _line_at(content, m.start())
-                    _ensure_type(name, "interface", fstr, line)
+        elif lang == "python":
+            for m in PY_PATTERNS["class"].finditer(content):
+                name = m.group(1)
+                bases = (m.group(2) or "").strip()
+                line = _line_at(content, m.start())
+                _ensure_type(name, "class", fstr, line)
 
-                    if extends_raw:
-                        for base in re.split(r'\s*,\s*', extends_raw):
-                            base = base.strip().split("<")[0].strip()
-                            if not base:
-                                continue
-                            _ensure_type(base, "interface")
-                            if base not in types[name]["extends"]:
-                                types[name]["extends"].append(base)
-                            edges.append({
-                                "from": name, "to": base,
-                                "relation": "extends", "file": fstr, "line": line,
-                            })
-
-                for m in TS_PATTERNS["enum"].finditer(content):
-                    name = m.group(1)
-                    _ensure_type(name, "enum", fstr, _line_at(content, m.start()))
-
-            elif lang == "python":
-                for m in PY_PATTERNS["class"].finditer(content):
-                    name = m.group(1)
-                    bases = (m.group(2) or "").strip()
-                    line = _line_at(content, m.start())
-                    _ensure_type(name, "class", fstr, line)
-
-                    if bases:
-                        for base in re.split(r'\s*,\s*', bases):
-                            base = base.strip().split("(")[0].strip()
-                            if not base or base in ("object",):
-                                continue
-                            _ensure_type(base)
-                            if base not in types[name]["extends"]:
-                                types[name]["extends"].append(base)
-                            edges.append({
-                                "from": name, "to": base,
-                                "relation": "extends", "file": fstr, "line": line,
-                            })
+                if bases:
+                    for base in re.split(r'\s*,\s*', bases):
+                        base = base.strip().split("(")[0].strip()
+                        if not base or base in ("object",):
+                            continue
+                        _ensure_type(base)
+                        if base not in types[name]["extends"]:
+                            types[name]["extends"].append(base)
+                        edges.append({
+                            "from": name, "to": base,
+                            "relation": "extends", "file": fstr, "line": line,
+                        })
 
     for name, info in types.items():
         for parent in info["extends"]:
@@ -528,49 +834,32 @@ def find_dead_code(project_root: str, language: str = "") -> list[dict]:
     all_symbols = collect_all_symbols(project_root)
 
     trait_methods: set[str] = set()
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
-        for fname in filenames:
-            fpath = Path(dirpath) / fname
-            if fpath.suffix != ".rs":
-                continue
-            try:
-                if fpath.stat().st_size > 256 * 1024:
-                    continue
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                continue
-            in_trait = False
-            brace_depth = 0
-            for line in content.split("\n"):
-                stripped = line.strip()
-                if re.match(r'^(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?trait\s+', stripped):
-                    in_trait = True
-                    brace_depth = 0
-                if in_trait:
-                    brace_depth += line.count("{") - line.count("}")
-                    fn_match = re.match(r'^\s*(?:async\s+)?fn\s+(\w+)', line)
-                    if fn_match:
-                        trait_methods.add(fn_match.group(1))
-                    if brace_depth <= 0 and in_trait:
-                        in_trait = False
+    for fpath in walk_code_files(project_root, lang_filter="rust"):
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        in_trait = False
+        brace_depth = 0
+        for line in content.split("\n"):
+            stripped = line.strip()
+            if re.match(r'^(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?trait\s+', stripped):
+                in_trait = True
+                brace_depth = 0
+            if in_trait:
+                brace_depth += line.count("{") - line.count("}")
+                fn_match = re.match(r'^\s*(?:async\s+)?fn\s+(\w+)', line)
+                if fn_match:
+                    trait_methods.add(fn_match.group(1))
+                if brace_depth <= 0 and in_trait:
+                    in_trait = False
 
     file_contents: dict[str, str] = {}
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
-        for fname in filenames:
-            fpath = Path(dirpath) / fname
-            if fpath.suffix not in CODE_EXTENSIONS:
-                continue
-            if language:
-                if _get_lang(fpath.suffix) != language:
-                    continue
-            try:
-                if fpath.stat().st_size > 256 * 1024:
-                    continue
-                file_contents[str(fpath)] = fpath.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                continue
+    for fpath in walk_code_files(project_root, lang_filter=language):
+        try:
+            file_contents[str(fpath)] = fpath.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
 
     name_pattern_cache: dict[str, re.Pattern] = {}
     dead: list[dict] = []
@@ -650,80 +939,70 @@ def preview_rename(old_name: str, new_name: str, project_root: str, language: st
     word_re = re.compile(rf'\b{re.escape(old_name)}\b')
     results: list[dict] = []
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
-        for fname in filenames:
-            fpath = Path(dirpath) / fname
-            if fpath.suffix not in CODE_EXTENSIONS:
-                continue
-            if language:
-                if _get_lang(fpath.suffix) != language:
-                    continue
-            try:
-                if fpath.stat().st_size > 256 * 1024:
-                    continue
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                continue
+    for fpath in walk_code_files(project_root, lang_filter=language):
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
 
-            fstr = str(fpath)
+        fstr = str(fpath)
 
-            for line_num, line in enumerate(content.split("\n"), 1):
-                for m in word_re.finditer(line):
-                    col = m.start()
-                    text = line.strip()[:120]
+        for line_num, line in enumerate(content.split("\n"), 1):
+            for m in word_re.finditer(line):
+                col = m.start()
+                text = line.strip()[:120]
 
-                    in_string = False
-                    quote_char = None
-                    i = 0
-                    while i < col:
-                        ch = line[i]
-                        if ch == '\\' and quote_char:
-                            i += 2
-                            continue
-                        if ch in _STRING_CHAR:
-                            if not in_string:
-                                in_string = True
-                                quote_char = ch
-                            elif ch == quote_char:
-                                in_string = False
-                                quote_char = None
-                        i += 1
-
-                    stripped = line.lstrip()
-                    is_comment = (
-                        stripped.startswith("//")
-                        or stripped.startswith("#")
-                        or stripped.startswith("*")
-                        or stripped.startswith("/*")
-                    )
-
-                    if in_string or is_comment:
-                        results.append({
-                            "file": fstr, "line": line_num, "column": col,
-                            "text": text,
-                            "category": "string_literal" if in_string else "comment",
-                            "would_rename": False,
-                        })
+                in_string = False
+                quote_char = None
+                i = 0
+                while i < col:
+                    ch = line[i]
+                    if ch == '\\' and quote_char:
+                        i += 2
                         continue
+                    if ch in _STRING_CHAR:
+                        if not in_string:
+                            in_string = True
+                            quote_char = ch
+                        elif ch == quote_char:
+                            in_string = False
+                            quote_char = None
+                    i += 1
 
-                    category = "other"
-                    if _DEF_KW_RE.match(line) and old_name in line[line.find(old_name):line.find(old_name)+len(old_name)+1]:
-                        category = "definition"
-                    elif _IMPORT_RE.search(line):
-                        category = "import"
-                    elif re.search(rf'(?:\.|::){re.escape(old_name)}\s*\(', line) or re.search(rf'\b{re.escape(old_name)}\s*(?:<[^>]*>\s*)?\(', line):
-                        category = "call"
-                    else:
-                        before = line[:col].rstrip()
-                        if before.endswith(":") or before.endswith("->") or before.endswith("<") or "extends" in line or "implements" in line or "where" in line:
-                            category = "type_reference"
+                stripped = line.lstrip()
+                is_comment = (
+                    stripped.startswith("//")
+                    or stripped.startswith("#")
+                    or stripped.startswith("*")
+                    or stripped.startswith("/*")
+                )
 
+                if in_string or is_comment:
                     results.append({
                         "file": fstr, "line": line_num, "column": col,
                         "text": text,
-                        "category": category,
-                        "would_rename": True,
+                        "category": "string_literal" if in_string else "comment",
+                        "would_rename": False,
                     })
+                    continue
+
+                category = "other"
+                if _DEF_KW_RE.match(line) and old_name in line[line.find(old_name):line.find(old_name)+len(old_name)+1]:
+                    category = "definition"
+                elif _IMPORT_RE.search(line):
+                    category = "import"
+                elif re.search(rf'(?:\.|::){re.escape(old_name)}\s*\(', line) or re.search(rf'\b{re.escape(old_name)}\s*(?:<[^>]*>\s*)?\(', line):
+                    category = "call"
+                else:
+                    before = line[:col].rstrip()
+                    if before.endswith(":") or before.endswith("->") or before.endswith("<") or "extends" in line or "implements" in line or "where" in line:
+                        category = "type_reference"
+
+                results.append({
+                    "file": fstr, "line": line_num, "column": col,
+                    "text": text,
+                    "category": category,
+                    "would_rename": True,
+                })
 
     return results

@@ -1,5 +1,7 @@
 # Knowledge Management
 
+## Tools
+
 ### add_knowledge(title, content, category="general", tags="", scope="project")
 - category: bugfix/decision/pattern/operation/architecture
 - tags: comma-separated
