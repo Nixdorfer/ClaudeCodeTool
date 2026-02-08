@@ -4,9 +4,5 @@
 !/skills/
 !/supervisor/
 !/mcp/
-/mcp/**
-!/mcp/*/*.py
-!/mcp/*/*.txt
-!/mcp/*/*.bat
-!/mcp/*/*.cmd
-!/mcp/*/*.ps1
+/mcp/**/__pycache__/
+/mcp/**/venv/
