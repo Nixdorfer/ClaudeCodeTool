@@ -8,9 +8,9 @@ allowed-tools: mcp__code-RAG__*
 
 ## 基本流程
 1. Bug修复前
-   检查`PROJECT/.claude/fix/List.md`是否存在
+   检查项目根目录中的`.claude/fix/List.md`是否存在
    - 如果不存在则新建一个
-   - 如果存在则阅读内容 修复用户指定的Bug(读取同目录下的Bug_X.md)
+   - 如果存在则阅读内容
 2. Bug修复时
    每次执行完一个对话后运行index_codebase更新索引 但不要运行add_knowledge 而是将修复方案详细记录到BUG_FIX.md
    - 如果用户不认可 则完全撤销这一条修改的代码 同时在排除列表记录这条无效的修复方案 从别的角度再尝试修复
