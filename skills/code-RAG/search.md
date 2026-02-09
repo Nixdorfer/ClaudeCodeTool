@@ -14,6 +14,9 @@ Returns indexed file/chunk counts.
 ### clear_index()
 Wipe code index. Run index_codebase after.
 
+### list_libs()
+List configured external libraries (from ragLibs in .mcp.json) with index status.
+
 ### index_symbols()
 Rebuild symbol index. Auto-runs with index_codebase.
 
