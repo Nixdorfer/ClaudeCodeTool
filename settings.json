@@ -7,16 +7,6 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python C:/Users/Nix/.claude/hooks/compact-log.py",
-            "timeout": 30
-          }
-        ]
-      },
-      {
         "matcher": "WebFetch",
         "hooks": [
           {
@@ -27,5 +17,8 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "everything-claude-code@everything-claude-code": true
   }
 }

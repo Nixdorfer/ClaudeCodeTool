@@ -1,4 +1,15 @@
 {
   "version": 2,
-  "plugins": {}
+  "plugins": {
+    "everything-claude-code@everything-claude-code": [
+      {
+        "scope": "user",
+        "installPath": "C:\\Users\\Nix\\.claude\\plugins\\cache\\everything-claude-code\\everything-claude-code\\1.4.1",
+        "version": "1.4.1",
+        "installedAt": "2026-02-12T14:58:41.844Z",
+        "lastUpdated": "2026-02-12T14:58:41.844Z",
+        "gitCommitSha": "b2285e870a08cbaa6a79347744195110dc4213fe"
+      }
+    ]
+  }
 }
