@@ -8,9 +8,8 @@
 
 # 主 Agent 约束
 
-- 禁止直接使用 Read/Edit/Write/Glob/Grep 工具读写文件
-- 所有文件操作必须通过派发 Agent 完成
-- 只允许阅读 Agent 回传的操作报告
+- 允许直接使用 Read/Glob/Grep 执行简单的文件查看和搜索
+- 禁止直接使用 Edit/Write 修改文件 文件修改必须通过派发 Agent 完成
 - 允许使用 Bash 工具
 - 简单操作派发 subagent 复杂操作派发 agent teams
 - SubAgent 数量最多为 5 个
@@ -19,11 +18,23 @@
 
 | Agent | 职责 | Skills |
 |-------|------|--------|
-| coder | 代码编写/修改/重构 | coding |
-| view-designer | HTML 布局 + JS/TS 逻辑 | coding, ui |
-| style-designer | CSS 美化和样式 | coding, ui |
+| planner | 功能规划/需求对齐/文档生成/协调实现 | ui |
+| coder | 代码编写/修改/重构 | - |
+| view-designer | HTML 布局 + JS/TS 逻辑 | ui |
+| style-designer | CSS 美化和样式 | ui |
 | auditor | 代码审计协调 (派发子审计 agent) | audit |
 | spa-fetcher | SPA 网页抓取 回传 md | alipay |
+
+## 审计子 Agent (由 auditor 派发)
+
+| Agent | 审计维度 |
+|-------|----------|
+| audit-arch | 架构/模块化/设计一致性 |
+| audit-security | 安全性 (注入/内存/侧信道/依赖链) |
+| audit-robust | 健壮性 (边界/错误/资源/竞态) |
+| audit-perf | 性能 (算法/内存/缓存/热路径) |
+| audit-completeness | 完成度/调用链/功能完善/前端验证 (修复型) |
+| audit-docs | 文档验证 (在线查询最新文档 验证调用正确性) |
 
 # 核心处理原则
 
@@ -35,6 +46,15 @@
 5. 模块边界 单一职责 接口通信
 6. 数据驱动 行为由配置决定
 7. 序列化一致性 统一格式
+
+# 编码规则
+
+- 只改必要的代码 最小变更
+- 单个文件功能单一 200-400 行典型 800 行上限
+- 函数小于 50 行 嵌套不超过 4 层
+- 禁止在代码中添加任何注释
+- 不可变优先 创建新对象而非修改已有对象
+- 脚本优先使用 powershell
 
 # 重构信号
 

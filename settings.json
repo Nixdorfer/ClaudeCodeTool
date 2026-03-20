@@ -2,9 +2,13 @@
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   },
-  "permissions": {
-    "allow": []
-  },
-  "enabledPlugins": {},
-  "skipDangerousModePermissionPrompt": true
+  "skipDangerousModePermissionPrompt": true,
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "python C:/Users/Nix/.claude/scripts/check-index.py"
+      }
+    ]
+  }
 }

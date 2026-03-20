@@ -1,0 +1,50 @@
+device: auto
+
+embedding:
+  model: nomic-ai/nomic-embed-code-v1
+  dimension: 768
+  batch_size_gpu: 64
+  batch_size_cpu: 8
+  max_length: 8192
+  doc_prefix: "search_document: "
+  query_prefix: "search_query: "
+
+chunking:
+  max_chunk_lines: 200
+  min_chunk_lines: 3
+  context_lines: 2
+
+search:
+  top_k: 20
+  rerank_top_k: 10
+  dense_weight: 0.7
+  sparse_weight: 0.3
+
+index:
+  ignore_patterns:
+    - "vendor/**"
+    - "node_modules/**"
+    - "**/dist/**"
+    - "**/*.min.js"
+    - "**/*.min.css"
+    - "**/*.map"
+    - "**/go.sum"
+    - "**/.git/**"
+    - "**/__pycache__/**"
+    - "**/venv/**"
+    - "**/.claude/**"
+  file_extensions:
+    - .php
+    - .java
+    - .go
+    - .rs
+    - .js
+    - .ts
+    - .html
+    - .vue
+    - .css
+    - .sql
+    - .json
+    - .yaml
+    - .yml
+    - .toml

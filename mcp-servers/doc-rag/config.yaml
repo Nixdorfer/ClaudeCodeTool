@@ -1,0 +1,56 @@
+device: auto
+
+models:
+  embedding:
+    name: BAAI/bge-m3
+    max_length: 8192
+    batch_size_gpu: 32
+    batch_size_cpu: 4
+    dimensions: 1024
+    use_fp16: true
+    store_colbert: false
+
+  reranker:
+    name: BAAI/bge-reranker-v2-m3
+    max_length: 1024
+    batch_size_gpu: 32
+    batch_size_cpu: 4
+    use_fp16: true
+
+parser:
+  mineru_enabled: true
+  fallback_to_docling: true
+  ocr:
+    paddleocr_enabled: true
+    paddleocr_use_onnx: true
+    paddleocr_lang: ch
+    tesseract_enabled: true
+    tesseract_lang: deu+eng
+
+chunker:
+  max_chunk_size: 512
+  min_chunk_size: 64
+  overlap: 64
+  table_as_single_chunk: true
+  use_jieba: true
+
+search:
+  top_k: 20
+  rerank_top_k: 5
+  dense_weight: 0.6
+  sparse_weight: 0.4
+  rrf_k: 60
+
+store:
+  index_dir: .claude/doc-rag
+
+supported_formats:
+  - .pdf
+  - .doc
+  - .docx
+  - .xls
+  - .xlsx
+  - .ppt
+  - .pptx
+  - .md
+  - .txt

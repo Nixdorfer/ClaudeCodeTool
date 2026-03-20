@@ -1,17 +1,20 @@
 /*
 
-!/settings.json
-!/CLAUDE.md
-!/ClaudeCode功能介绍.md
-!/README.md
-!/初始化环境.ps1
-!/.gitignore
-!/.mcp.json
+!/agents
+!/skills
+!/scripts
+!/rules
 
-!/mcp/
-!/hooks/
-!/skills/
-!/plugins/
-!/scripts/
-/mcp/**/__pycache__/
-/mcp/**/venv/
+!/CLAUDE.md
+!/settings.json
+
+!/mcp-servers
+/mcp-servers/**/venv/
+/mcp-servers/**/__pycache__/
+/mcp-servers/**/*.pyc
+!/mcp-servers/code-rag/*.py
+!/mcp-servers/code-rag/config.yaml
+!/mcp-servers/code-rag/requirements.txt
+!/mcp-servers/doc-rag/*.py
+!/mcp-servers/doc-rag/config.yaml
+!/mcp-servers/doc-rag/requirements.txt
