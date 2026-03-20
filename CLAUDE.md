@@ -4,19 +4,45 @@
 - 如果表达不明确 请提供选项而不是猜测
 - 如果我的需求并非最优 请先提出更优方案
 - 如果已有库 请直接命名而不是手动编写
+- 不要写任何标点 用一个空格替代
 
-# 代码
-- 不使用注释
-- 将共享代码提取到独立的库中
-- 使用单一用途的文件；避免代码臃肿
-- 优先使用通用代码 + 配置注入 而非硬编码特殊情况
-- 使用尽可能简短的 节省token的语句
-- 不要写任何标点 用一个空格来替代 用/替代、
+# 主 Agent 约束
 
-# 工作流程
-- 优先使用skill:code-RAG代替grep/read
-- 处理复杂任务前先在.claude/plans/目录下生成md计划
-- 派发3个或更多SubAgent时 使用并行workflow
-  1. 派发N个Worker SubAgent(run_in_background=true)收集所有 task_id
-  2. 在同一消息中 并行调用N个TaskOutput(id, block=true, timeout=600000)
-  3. 所有SubAgent返回后 主Agent继续执行
+- 禁止直接使用 Read/Edit/Write/Glob/Grep 工具读写文件
+- 所有文件操作必须通过派发 Agent 完成
+- 只允许阅读 Agent 回传的操作报告
+- 允许使用 Bash 工具
+- 简单操作派发 subagent 复杂操作派发 agent teams
+- SubAgent 数量最多为 5 个
+
+# Agent 清单
+
+| Agent | 职责 | Skills |
+|-------|------|--------|
+| coder | 代码编写/修改/重构 | coding |
+| view-designer | HTML 布局 + JS/TS 逻辑 | coding, ui |
+| style-designer | CSS 美化和样式 | coding, ui |
+| auditor | 代码审计协调 (派发子审计 agent) | audit |
+| spa-fetcher | SPA 网页抓取 回传 md | alipay |
+
+# 核心处理原则
+
+0. 系统性设计优先 禁止就近解决
+1. 唯一真相源 常量/配置只定义一处
+2. 分层架构 Core 不依赖 UI
+3. 泛化优先 工厂/注册表/配置驱动
+4. 去重 2+ 处相似内容先重构为共享模块
+5. 模块边界 单一职责 接口通信
+6. 数据驱动 行为由配置决定
+7. 序列化一致性 统一格式
+
+# 重构信号
+
+| 信号 | 动作 |
+|------|------|
+| 同一逻辑 2+ 位置 | 提取共享模块 |
+| 多个模块做同一件事 | 合并唯一入口 |
+| 函数 95%+ 相同 | 合并 + 参数控制 |
+| 跨层直接访问 | 消息桥/接口层 |
+| 硬编码散布多处 | Config 结构 |
+| 枚举序列化不一致 | 统一 serde 策略 |

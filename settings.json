@@ -1,24 +1,10 @@
 {
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
   "permissions": {
-    "allow": [
-      "MCP(code-RAG:*)"
-    ]
+    "allow": []
   },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "WebFetch",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python C:/Users/Nix/.claude/hooks/fetch-spa-intercept.py",
-            "timeout": 120
-          }
-        ]
-      }
-    ]
-  },
-  "enabledPlugins": {
-    "everything-claude-code@everything-claude-code": true
-  }
+  "enabledPlugins": {},
+  "skipDangerousModePermissionPrompt": true
 }
